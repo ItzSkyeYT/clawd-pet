@@ -27,6 +27,7 @@ sys.path.insert(0, ROOT)
 
 from PyQt6.QtCore import QPoint, QRect, QSettings, Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
+from PyQt6.QtGui import QColor  # noqa: E402
 
 APP = QApplication.instance() or QApplication([])
 
@@ -720,6 +721,46 @@ class Birthday(unittest.TestCase):
         self.assertEqual(self.pet.scale, base)
         self.assertAlmostEqual(sum(self.pet.box_span()) / 2, centre, delta=base)
         self.assertAlmostEqual(self.pet._feet(), feet, delta=1)
+
+    def test_the_party_has_it_all(self):
+        self.its(9, 15)
+        pet = self.pet
+        pet.play("birthday")
+        kinds, layers, clipped, cake_at = set(), set(), [], None
+        for _ in range(int(90_000 / 16)):
+            pet.advance(16)
+            box = QRect(0, 0, pet.width(), pet.height())
+            kinds |= {q["kind"] for q in pet.particles}
+            layers |= set(pet.layers)
+            for q in pet.particles:
+                if q["kind"].startswith(("letter_", "balloon_")) and pet._fade(q) > 0:
+                    if not box.contains(pet._glyph_rect(q)):
+                        clipped.append(q["kind"])
+            if "cake_0" in pet.layers:
+                cake_at = pet.layers["cake_0"]
+            if pet.action != "birthday":
+                break
+        letters = {k.split("_")[1] for k in kinds if k.startswith("letter_")}
+        self.assertEqual(letters, set("HAPYBIRTD!"))
+        self.assertTrue(any(k.startswith("letter_") and k.count("_") == 2 for k in kinds))   # tinted
+        self.assertTrue(any(k.startswith("balloon_") for k in kinds))
+        self.assertTrue({"cake_0", "cake_1", "cake_2", "gift"} <= layers)
+        self.assertTrue(any(k.startswith("puff_") for k in kinds))
+        self.assertTrue(any(k.startswith("smoke_") for k in kinds))
+        self.assertEqual(clipped, [], "cut off at the edge of his window")
+        # held up in front of him: his eyes clear, the flames between them
+        hx, hy = pet.sp.cake_hold
+        self.assertEqual(cake_at, (pet.iw / 2 - hx, pet.ih - 1 - hy))
+        idle = pet.sp.poses["idle"]
+        eyes = [(x, y) for y in range(idle.height()) for x in range(idle.width())
+                if QColor(idle.pixel(x, y)).name() == "#141413"]
+        cake = pet.sp.props["cake_0"]
+        for x, y in eyes:
+            cx, cy = int(x - cake_at[0]), int(y - cake_at[1])
+            inside = 0 <= cx < cake.width() and 0 <= cy < cake.height()
+            self.assertFalse(inside and QColor.fromRgba(cake.pixel(cx, cy)).alpha(), (x, y))
+        flames = [fx + cake_at[0] for fx, fy in pet.sp.cake_flames]
+        self.assertTrue(all(min(x for x, y in eyes) < f < max(x for x, y in eyes) for f in flames))
 
     def test_a_restart_mid_party_keeps_your_size(self):
         self.its(9, 15)

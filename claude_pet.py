@@ -119,6 +119,7 @@ POINTER_SCENES = ["grab"]
 PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + TIME_SCENES + POINTER_SCENES + ["idle"])
 
 EXTRAS_FILE = os.path.join(HERE, "sprites", "extras.py")
+BIRTHDAY_FILE = os.path.join(HERE, "sprites", "birthday.py")
 HATS = {"santa_hat": "Santa hat", "pumpkin_hat": "Pumpkin", "party_hat": "Party hat", "nightcap": "Nightcap"}
 
 # ── Settings ────────────────────────────────────────────────────────
@@ -373,15 +374,15 @@ def grid_image(rows, palette):
     return QImage(bytes(buf), w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
 
 
-def load_extras(path=EXTRAS_FILE):
-    """sprites/extras.py's EXTRAS (hats and props), read as plain data: the
-    file is parsed, never imported or run."""
+def load_extras(path=EXTRAS_FILE, name="EXTRAS"):
+    """sprites/extras.py's EXTRAS (hats and props), or another art file's
+    dict, read as plain data: the file is parsed, never imported or run."""
     with open(path) as f:
         tree = ast.parse(f.read(), path)
     for node in tree.body:
-        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "EXTRAS" for t in node.targets):
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == name for t in node.targets):
             return ast.literal_eval(node.value)
-    raise ValueError("no EXTRAS in " + path)
+    raise ValueError(f"no {name} in {path}")
 
 
 PLASMA_DESKTOP_RC = os.path.expanduser("~/.config/plasma-org.kde.plasma.desktop-appletsrc")
@@ -857,6 +858,39 @@ class Sprites:
                 "size": [len(sd["frames"][0][0]), len(sd["frames"][0])], "home": sd["home"],
                 "frames": [{"ms": 90, "rows": rows} for rows in sd["frames"]]},
                 {k: rgb(v) for k, v in sd["palette"].items()})
+        # The birthday party (sprites/birthday.py): a cake he holds up in front
+        # of him (lit twice, to flicker, then blown out), smoke from its wicks,
+        # the puff that blows them out, balloons, HAPPY BIRTHDAY! letters (with
+        # tints for a rainbow) and a present
+        party = load_extras(BIRTHDAY_FILE, "BIRTHDAY") if os.path.exists(BIRTHDAY_FILE) else {}
+
+        def party_images(e):
+            pal = {k: rgb(v) for k, v in e["palette"].items()}
+            return [grid_image(rows, pal) for rows in e["frames"]]
+        if "cake" in party:
+            for i, img in enumerate(party_images(party["cake"])):
+                self.props[f"cake_{i}"] = img
+            self.cake_hold = tuple(party["cake"]["hold"])
+            self.cake_flames = [tuple(f) for f in party["cake"]["flames"]]
+            self.cake_wicks = [tuple(w) for w in party["cake"]["wicks"]]
+        for name in ("smoke", "puff", "balloon"):
+            if name in party:
+                for i, img in enumerate(party_images(party[name])):
+                    self.glyphs[f"{name}_{i}"] = img
+        if "gift" in party:
+            self.props["gift"] = party_images(party["gift"])[0]
+        self.letters, self.letter_tints = {}, 0
+        if "letters" in party:
+            lt = party["letters"]
+            for t, pal in enumerate([lt["palette"]] + lt.get("tints", [])):
+                pal = {k: rgb(v) for k, v in pal.items()}
+                for ch, rows in lt["frames"].items():
+                    img = grid_image(rows, pal)
+                    if t == 0:
+                        self.letters[ch] = self.glyphs["letter_" + ch] = img
+                    else:
+                        self.glyphs[f"letter_{ch}_{t - 1}"] = img
+            self.letter_tints = len(lt.get("tints", []))
         # nightcap_stretch: the nightcap with its tail flipped up, out of the left arm's way
         self.hats = {n: (images(n), tuple(extras[n]["anchor"])) for n in list(HATS) + ["nightcap_stretch"]}
         self.hats_flipped = {n: [flipped(img) for img in frames] for n, (frames, _) in self.hats.items()}
@@ -3468,42 +3502,60 @@ class ClawdPet(QWidget):
             x = self.iw / 2 - width / 2
             y = base_y + row * (h + 2)
             for ch in word:
-                self._emit("letter_" + ch, x, y, life=16_000, wave=(0.0, 0.8, 5.0, k * 0.55))
+                kind = f"letter_{ch}_{k % self.sp.letter_tints}" if self.sp.letter_tints else "letter_" + ch
+                self._emit(kind, x, y, life=16_000, wave=(0.0, 0.8, 5.0, k * 0.55))
                 x += letters[ch].width() + gap
                 k += 1
                 yield 70
         yield 600
 
     def _balloons(self):
+        """Balloons floating up around him, swaying; they fade before they'd
+        reach the top of his window."""
         n = sum(1 for k in self.sp.glyphs if k.startswith("balloon_"))
+        top = -self.home_px.y() / self.scale
         for k in range(5 if n else 0):
-            self._emit(f"balloon_{k % n}", random.uniform(-10, self.iw + 4), random.uniform(0, 8),
-                       vy=-random.uniform(3.5, 5.5), life=9000, wave=(1.2, 0.0, random.uniform(2, 3), k))
+            g = self.sp.glyphs[f"balloon_{k % n}"]
+            y, vy = self.ih + 2 - g.height() - random.uniform(0, 8), random.uniform(3.5, 5.5)   # strings off the floor
+            x = (-g.width() - random.uniform(2, 9) if k % 2 == 0          # either side of him, never over him
+                 else self.iw + random.uniform(1, 8))
+            self._emit(f"balloon_{k % n}", x, y, vy=-vy,
+                       life=min(9000.0, 1000 * (y - top - 1) / vy), wave=(1.2, 0.0, random.uniform(2, 3), k))
             yield 220
         yield 300
 
     def _birthday_cake(self):
-        """The cake on the floor beside him: a wish, a big breath, candles out."""
+        """He holds up a cake, the candles burning between his eyes, a present
+        at his feet: a wish (eyes shut), a big puff, the candles out and smoke
+        curling up from the wicks."""
         if "cake_0" not in self.sp.props:
             yield 0
             return
         hx, hy = self.sp.cake_hold
-        at = (self.iw + 2 + self.sp.props["cake_0"].width() / 2 - hx, self.ih - hy)   # standing beside him
-        for k in range(8):                                  # lit, the flames flickering
-            self.layers = {f"cake_{k % 2}": at}
-            if k == 3:
+        at = (self.iw / 2 - hx, self.ih - 1 - hy)           # its bottom middle on his, in front of him
+        gift = {}
+        if "gift" in self.sp.props:
+            g = self.sp.props["gift"]
+            gift = {"gift": (-g.width() - 2, self.ih - g.height())}   # on the floor beside him
+        self.pose("idle")
+        for k in range(12):                                 # lit, the flames flickering
+            self.layers = {**gift, f"cake_{k % 2}": at}
+            if k == 5:
                 self.pose("blink")                          # eyes shut: a wish
+            elif k == 10:
+                self.pose("idle")
             yield 160
-        self.pose("happy")
-        yield 300
-        face = (self.iw - 4, 4)
-        for k in range(4):                                  # a big puff at the candles
-            self._emit(f"puff_{k % 2}", face[0] + k * 2, face[1] + random.uniform(-1, 1), vx=12, life=450)
-            yield 90
-        self.layers = {"cake_2": at}                         # out
-        for fx, fy in self.sp.cake_flames:
-            self._emit("smoke_0", at[0] + fx - 1, at[1] + fy - 4, vy=-3, life=1600,
+        mid = sum(fx for fx, _ in self.sp.cake_flames) / len(self.sp.cake_flames)
+        top = min(fy for _, fy in self.sp.cake_flames)
+        self._emit("puff_0", at[0] + mid - 2, at[1] + top - 3, vy=-3, life=260)   # a big puff...
+        yield 200
+        self._emit("puff_1", at[0] + mid - 2, at[1] + top - 4, vy=-4, life=380)
+        self.layers = {**gift, "cake_2": at}                 # ...and they're out
+        for wx, wy in self.sp.cake_wicks:                    # smoke from each wick, in step
+            self._emit("smoke_0", at[0] + wx - 1, at[1] + wy - 5, vy=-2.5, life=1600,
                        flap=("smoke_0", "smoke_1", "smoke_2"))
+        yield 500
+        self.pose("happy")
         for k in range(3):
             self._emit("heart", self.iw / 2 - 2 + random.uniform(-6, 6), -3.0,
                        vx=random.uniform(-1, 1), vy=-4.0, life=1400)
