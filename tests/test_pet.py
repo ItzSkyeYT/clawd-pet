@@ -12,19 +12,33 @@ Set CLAWD_SNAPSHOTS=/some/dir to also save a PNG of every animation's frames.
 import json
 import os
 import random
+import socket
+import subprocess
 import sys
+import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.environ["QT_QPA_PLATFORM"] = "offscreen:configfile=" + os.path.join(ROOT, "tests", "screens.json")
 sys.path.insert(0, ROOT)
 
-from PyQt6.QtCore import QRect  # noqa: E402
+from PyQt6.QtCore import QRect, Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 APP = QApplication.instance() or QApplication([])
 
 import claude_pet as cp  # noqa: E402
+
+HOOK = os.path.join(ROOT, "clawd_hook.py")
+
+
+def run_ms(pet, ms, until=None):
+    for _ in range(int(ms / 16)):
+        pet.advance(16)
+        if until and until():
+            return True
+    return False
 
 
 def idle_rows(data):
@@ -130,6 +144,13 @@ class Pet(unittest.TestCase):
                 screens.add(self.pet.screen_geometry().left())
         self.assertGreaterEqual(len(seen - {"idle"}), 4, f"only saw {seen}")
         self.assertEqual(len(screens), 2, "he never visited the other screen")
+
+    def test_walks_briskly(self):
+        start = self.pet.box_span()[0]
+        self.pet.start("walk", target=start - 300)
+        took = self.run_until_idle()
+        self.assertLess(took, 8000, "300px took too long")
+        self.assertAlmostEqual(self.pet.box_span()[0], start - 300, delta=12)
 
     def test_dropping_him_lands_on_the_ground(self):
         self.pet.y = self.pet.ground_y() - 300
@@ -270,7 +291,249 @@ class BetweenScreens(unittest.TestCase):
         self.assertNotIn("leap", [self.pet._pick_action() for _ in range(300)])
 
 
+class Ladder(unittest.TestCase):
+    HDMI = QRect(1920, 0, 1920, 1080)
+    LAPTOP = QRect(0, 330, 1920, 1200)
+
+    def setUp(self):
+        random.seed(11)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def stand(self, box_left):
+        self.pet.set_box_left(box_left)
+        self.pet.y = self.pet.ground_y()
+        self.pet.start("idle")
+
+    def feet(self):
+        return self.pet.y + self.pet.home_px.y() + self.pet.ih * self.pet.scale
+
+    def climb(self):
+        self.pet.start("climb")
+        ladder = None
+        for _ in range(int(90_000 / 16)):
+            self.pet.advance(16)
+            if self.pet.ladder.isVisible():
+                ladder = self.pet.ladder.geometry()
+            if self.pet.action != "climb":
+                break
+        self.assertEqual(self.pet.action, "idle")
+        return ladder
+
+    def test_climbs_a_ladder_up_to_the_high_screen(self):
+        self.stand(1600)
+        ladder = self.climb()
+        self.assertIsNotNone(ladder, "no ladder appeared")
+        self.assertLessEqual(ladder.x() + ladder.width(), 1920)       # stands on the laptop side
+        self.assertAlmostEqual(ladder.y() + ladder.height(), 1530, delta=self.pet.scale)
+        self.assertLessEqual(ladder.y(), 1080)                          # reaches the HDMI floor
+        self.assertEqual(self.pet.screen_geometry(), self.HDMI)
+        self.assertAlmostEqual(self.feet(), 1080, delta=1)
+        self.assertFalse(self.pet.ladder.isVisible(), "ladder left behind")
+
+    def test_climbs_down_a_ladder_to_the_laptop(self):
+        self.stand(2100)
+        ladder = self.climb()
+        self.assertIsNotNone(ladder, "no ladder appeared")
+        self.assertLessEqual(ladder.x() + ladder.width(), 1920)
+        self.assertEqual(self.pet.screen_geometry(), self.LAPTOP)
+        self.assertAlmostEqual(self.feet(), 1530, delta=1)
+        self.assertFalse(self.pet.ladder.isVisible())
+
+    def test_interrupted_climb_packs_the_ladder_away(self):
+        self.stand(1700)
+        self.pet.start("climb")
+        self.assertTrue(run_ms(self.pet, 20_000, until=self.pet.ladder.isVisible))
+        self.pet.start("held")
+        self.assertFalse(self.pet.ladder.isVisible())
+
+    def test_the_ladder_lets_clicks_through(self):
+        self.assertTrue(self.pet.ladder.windowFlags() & Qt.WindowType.WindowTransparentForInput)
+
+
+class ClaudeHooks(unittest.TestCase):
+    def setUp(self):
+        random.seed(5)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.tmp = tempfile.mkdtemp()
+        self.sock = os.path.join(self.tmp, "pet.sock")
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def hook(self, payload, sock=None):
+        env = dict(os.environ, CLAWD_PET_SOCKET=sock or self.sock)
+        return subprocess.run([sys.executable, "-S", HOOK], input=json.dumps(payload),
+                              capture_output=True, text=True, env=env, timeout=10)
+
+    def pump(self, until, seconds=3):
+        end = time.time() + seconds
+        while time.time() < end:
+            APP.processEvents()
+            if until():
+                return True
+            time.sleep(0.01)
+        return False
+
+    def test_a_prompt_makes_him_work_until_claude_stops(self):
+        self.pet.claude_event({"event": "UserPromptSubmit", "session": "a"})
+        run_ms(self.pet, 3000)
+        self.assertEqual(self.pet.action, "work")
+        self.assertEqual(self.pet.frame[1], "laptop")
+        self.pet.claude_event({"event": "PreToolUse", "session": "a", "tool": "Edit"})
+        run_ms(self.pet, 20_000)
+        self.assertEqual(self.pet.action, "work")
+        self.pet.claude_event({"event": "Stop", "session": "a"})
+        seen = set()
+        for _ in range(int(20_000 / 16)):
+            self.pet.advance(16)
+            seen.add(self.pet.action)
+            if "celebrate" in seen and self.pet.action == "idle":
+                break
+        self.assertIn("celebrate", seen)
+        self.assertEqual(self.pet.action, "idle")
+
+    def test_a_permission_request_calls_you_over(self):
+        self.pet.claude_event({"event": "UserPromptSubmit", "session": "a"})
+        self.pet.claude_event({"event": "PermissionRequest", "session": "a", "tool": "Bash"})
+        run_ms(self.pet, 500)
+        self.assertEqual(self.pet.action, "attention")
+        self.assertTrue(any(q["kind"] == "bubble" for q in self.pet.particles))
+        self.assertEqual(self.pet.click_link(), cp.CLAUDE_LINKS["needs-input"])
+        self.pet.claude_event({"event": "PostToolUse", "session": "a", "tool": "Bash"})
+        run_ms(self.pet, 5000)
+        self.assertEqual(self.pet.action, "work")
+        self.assertFalse(any(q["kind"] == "bubble" for q in self.pet.particles))
+        self.assertEqual(self.pet.click_link(), cp.CLAUDE_LINKS["continue"])
+
+    def test_an_idle_reminder_after_the_turn_does_not_nag(self):
+        self.pet.claude_event({"event": "Notification", "session": "a", "kind": "idle_prompt"})
+        run_ms(self.pet, 500)
+        self.assertNotEqual(self.pet.action, "attention")
+
+    def test_forgotten_sessions_expire(self):
+        self.pet.claude_event({"event": "UserPromptSubmit", "session": "a"})
+        run_ms(self.pet, 16 * 60_000)
+        self.assertIsNone(self.pet.claude_mode())
+
+    def test_the_hook_sends_names_only_and_the_pet_hears_it(self):
+        self.assertTrue(self.pet.listen(self.sock))
+        r = self.hook({"hook_event_name": "PreToolUse", "session_id": "s1", "tool_name": "Bash",
+                       "tool_input": {"command": "echo SECRET-TOKEN"}})
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertTrue(self.pump(lambda: self.pet.last_message is not None))
+        self.assertEqual(self.pet.last_message, {"event": "PreToolUse", "session": "s1", "tool": "Bash"})
+        self.assertNotIn("SECRET", json.dumps(self.pet.last_message))
+        self.assertEqual(self.pet.claude_mode(), "busy")
+
+    def test_the_hook_is_silent_and_quick_without_a_pet(self):
+        t = time.time()
+        r = self.hook({"hook_event_name": "Stop", "session_id": "s1"}, sock=self.sock + ".missing")
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertLess(time.time() - t, 2)
+
+    def test_play_and_status_over_the_socket(self):
+        self.assertTrue(self.pet.listen(self.sock))
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.connect(self.sock)
+        c.sendall(b'{"cmd": "play", "action": "wave"}\n{"cmd": "status"}\n')
+        c.setblocking(False)
+        got = b""
+
+        def answered():
+            nonlocal got
+            try:
+                got += c.recv(4096)
+            except BlockingIOError:
+                pass
+            return got.endswith(b"\n")
+        self.assertTrue(self.pump(answered))
+        self.assertEqual(json.loads(got)["action"], "wave")
+        c.close()
+
+
+class CursorReactions(unittest.TestCase):
+    def setUp(self):
+        random.seed(9)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.pet.start("idle")
+        run_ms(self.pet, 100)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def test_he_watches_a_nearby_pointer(self):
+        left, right = self.pet.box_span()
+        mid = self.pet._mid()
+        self.pet.cursor_moved(left - 120, mid)
+        self.pet.advance(16)
+        self.assertEqual(self.pet.frame, ("pose", "look_l", False))
+        self.pet.cursor_moved(right + 120, mid)
+        self.pet.advance(16)
+        self.assertEqual(self.pet.frame, ("pose", "look_r", False))
+
+    def test_stroking_him_makes_him_happy(self):
+        left, right = self.pet.box_span()
+        cx, mid = (left + right) / 2, self.pet._mid()
+        hearts, happy = False, False
+        for i in range(40):
+            self.pet.cursor_moved(cx + (25 if i % 2 else -25), mid)
+            run_ms(self.pet, 80)
+            hearts = hearts or any(q["kind"] == "heart" for q in self.pet.particles)
+            happy = happy or self.pet.frame == ("pose", "happy", False)
+        self.assertTrue(hearts, "no hearts")
+        self.assertTrue(happy or self.pet.action == "dance")
+
+    def test_kwin_script_reports_to_our_service(self):
+        js = cp.kwin_cursor_script()
+        self.assertIn("cursorPosChanged", js)
+        self.assertIn(cp.DBUS_SERVICE, js)
+
+
+class Installer(unittest.TestCase):
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("install_hooks", os.path.join(ROOT, "tools", "install_hooks.py"))
+        self.ih = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.ih)
+
+    def test_install_keeps_everything_else_and_is_repeatable(self):
+        mine = {"type": "command", "command": "prettier --write"}
+        before = {"model": "opus", "hooks": {"PostToolUse": [{"matcher": "Edit", "hooks": [mine]}]}}
+        once = self.ih.install(before)
+        twice = self.ih.install(once)
+        self.assertEqual(once, twice)
+        self.assertEqual(once["model"], "opus")
+        self.assertIn(mine, once["hooks"]["PostToolUse"][0]["hooks"])
+        for event in self.ih.EVENTS:
+            ours = [h for g in once["hooks"][event] for h in g["hooks"] if "clawd_hook.py" in h["command"]]
+            self.assertEqual(len(ours), 1, event)
+            self.assertTrue(ours[0]["async"], event)
+
+    def test_remove_restores_the_original(self):
+        before = {"theme": "dark", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]}}
+        self.assertEqual(self.ih.strip(self.ih.install(before)), before)
+        self.assertEqual(self.ih.strip(self.ih.install({"theme": "dark"})), {"theme": "dark"})
+
+
 class Launcher(unittest.TestCase):
+    def test_clicking_opens_the_code_tab_of_the_app(self):
+        self.assertEqual(cp.CLAUDE_LINKS["continue"], "claude://code/continue?session=last")
+        self.assertEqual(cp.CLAUDE_LINKS["new"], "claude://code/new")
+        self.assertEqual(cp.CLAUDE_LINKS["needs-input"], "claude://code/needs-input")
+
+    def test_url_opener_per_platform(self):
+        which = lambda n: "/usr/bin/" + n  # noqa: E731
+        self.assertEqual(cp.open_url_command("claude://x", "linux", which), ["/usr/bin/xdg-open", "claude://x"])
+        self.assertEqual(cp.open_url_command("claude://x", "darwin", which), ["open", "claude://x"])
+        self.assertEqual(cp.open_url_command("claude://x", "win32", which),
+                         ["cmd", "/c", "start", "", "claude://x"])
+
     def which_only(self, *names):
         return lambda n: f"/usr/bin/{n}" if n in names else None
 

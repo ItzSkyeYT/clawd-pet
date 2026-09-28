@@ -5,10 +5,12 @@ Every animation is traced from Anthropic's official Clawd art
 (tools/trace_official.py turns their GIFs into sprites/clawd.json), so he
 moves the way he does in the Claude apps: crab-walking, jumping, waving,
 typing on a laptop, riding a cloud, racing a kart, peeking in from the edge
-of the screen.
+of the screen. With the hooks installed (tools/install_hooks.py) he follows
+Claude Code: typing while it works, calling you over when it needs a
+permission, celebrating when it's done.
 
-Left-click: open Claude Code        Right-click: menu
-Drag: pick him up and throw him     (he falls back to the bottom of the screen)
+Left-click: open Claude Code (the Code tab of the Claude app)
+Right-click: menu    Drag: pick him up and throw him    Stroke him: he likes it
 """
 
 import json
@@ -18,6 +20,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import webbrowser
 
@@ -30,8 +33,10 @@ if (sys.platform.startswith("linux") and os.environ.get("WAYLAND_DISPLAY")
     os.environ["QT_QPA_PLATFORM"] = "xcb"
     _FORCED_XCB = True
 
-from PyQt6.QtCore import QElapsedTimer, QPoint, QRect, QSettings, Qt, QTimer
-from PyQt6.QtGui import QActionGroup, QBitmap, QIcon, QImage, QPainter, QPixmap, QRegion
+from PyQt6.QtCore import (QElapsedTimer, QObject, QPoint, QRect, QSettings, Qt, QTimer,
+                          pyqtClassInfo, pyqtSlot)
+from PyQt6.QtGui import QActionGroup, QBitmap, QCursor, QIcon, QImage, QPainter, QPixmap, QRegion
+from PyQt6.QtNetwork import QLocalServer
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -41,10 +46,13 @@ SCALES = {"Small": 3, "Medium": 4, "Large": 6, "Huge": 8}   # screen px per spri
 DEFAULT_SCALE = 4
 TICK_MS = 16
 
-# Speeds in sprite pixels per second, so they grow with the pet.
-WALK_SPEED = 6
+# Speeds in sprite pixels per second, so they grow with the pet. The tempos
+# speed up the official walk cycle so his legs keep up with the pace.
+WALK_SPEED, WALK_TEMPO = 15, 0.7
+TRIP_SPEED, TRIP_TEMPO = 24, 0.5
 CLOUD_SPEED = 30
 RACE_SPEED = 45
+CLIMB_SPEED = 14
 GRAVITY = 700
 
 # What he does on his own, and how often.
@@ -53,20 +61,70 @@ WEIGHTS = {
     "sparkler": 4, "cloud": 5, "race": 4, "lurk": 7, "sleep": 3,
 }
 ACTIONS = list(WEIGHTS)
+BETWEEN_SCREENS = ["climb", "leap"]        # only when he's next to another screen
 LABELS = {
     "walk": "Walk", "wave": "Wave", "jump": "Jump", "jump_happy": "Happy jump",
     "dance": "Dance", "laptop": "Laptop", "sparkler": "Sparkler",
     "cloud": "Ride the cloud", "race": "Go karting", "lurk": "Peek from the edge",
-    "sleep": "Nap",
+    "sleep": "Nap", "climb": "Climb to the other screen", "leap": "Leap to the other screen",
 }
+PLAYABLE = set(ACTIONS + BETWEEN_SCREENS + ["idle", "work", "attention", "celebrate"])
 
 # Where the eyes sit in the idle pose (top-left of each 2x2 eye).
 EYES = ((6, 2), (16, 2))
 
-# Sleeping Z's, drawn on the same pixel grid as Clawd.
-Z_SMALL = ["##.", ".#.", ".##"]
-Z_BIG = ["####", "..#.", ".#..", "####"]
-Z_RGB = (106, 155, 204)        # Claude Code's own "professional blue"
+INK = (20, 20, 19)            # Anthropic's near-black, as in the official art
+IVORY = (250, 249, 245)
+BLUE = (106, 155, 204)        # Claude Code's own "professional blue"
+PINK = (232, 91, 106)
+RAIL_DARK = (77, 76, 72)      # the kart's greys
+RAIL_LIGHT = (156, 154, 146)
+
+# Little extras drawn on the same pixel grid as Clawd.
+GLYPHS = {
+    "z_small": (["##.", ".#.", ".##"], {"#": BLUE}),
+    "z_big": (["####", "..#.", ".#..", "####"], {"#": BLUE}),
+    "heart": ([".#.#.", "#####", "#####", ".###.", "..#.."], {"#": PINK}),
+    "bubble": ([".#######.",
+                "#+++++++#",
+                "#+++@+++#",
+                "#+++@+++#",
+                "#+++@+++#",
+                "#+++++++#",
+                "#+++@+++#",
+                "#+++++++#",
+                ".###+###.",
+                "...#+#...",
+                "....#...."], {"#": INK, "+": IVORY, "@": INK}),
+}
+LADDER_W = 10
+LADDER_PALETTE = {"d": RAIL_DARK, "l": RAIL_LIGHT}
+
+CURSOR_NEAR = 70              # sprite pixels: how close the pointer must be for him to watch it
+
+# Deep links the Claude desktop app itself uses (its launcher actions).
+CLAUDE_LINKS = {
+    "continue": "claude://code/continue?session=last",   # your most recent Code session
+    "new": "claude://code/new",
+    "needs-input": "claude://code/needs-input",          # the session waiting on a permission
+}
+
+# Claude Code hook events, grouped by what they mean for Clawd.
+BUSY_EVENTS = {"UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
+               "SubagentStart", "SubagentStop", "PreCompact", "PostCompact"}
+ATTENTION_KINDS = {"permission_prompt", "elicitation_dialog"}
+
+DBUS_SERVICE = "org.clawdpet.Pet"
+KWIN_SCRIPT = "clawd-pet-cursor"
+
+
+def runtime_dir():
+    return os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+
+
+def socket_path():
+    """Where the pet listens for clawd_hook.py. Keep in sync with the hook."""
+    return os.environ.get("CLAWD_PET_SOCKET") or os.path.join(runtime_dir(), "clawd-pet.sock")
 
 
 # ── Sprites ─────────────────────────────────────────────────────────
@@ -123,9 +181,44 @@ def pose_rows(idle, kind):
     return ["".join(r) for r in g]
 
 
+def climb_rows(idle):
+    """A climbing pose from official parts: the idle body with its left arm
+    raised the way Clawd-Jumping raises both, the right arm lower down on a
+    rung, and the right legs lifted."""
+    body = idle[0][4]
+    w = len(idle[0])
+    rows = [list("." * w) for _ in range(4)] + [list(r) for r in idle]
+    for y in range(8, 12):             # the arm rows, 4 lower now
+        for x in range(0, 4):
+            rows[y][x] = "."
+    for y in range(0, 4):              # ...and the left arm up above the head
+        for x in range(5, 9):
+            rows[y][x] = body
+    for x in range(w - 4, w):          # right arm two pixels lower
+        rows[8][x] = rows[9][x] = "."
+        rows[12][x] = rows[13][x] = body
+    for x in (14, 15, 18, 19):
+        rows[-1][x] = "."
+    return ["".join(r) for r in rows]
+
+
+def ladder_rows(height):
+    rows = []
+    for y in range(height):
+        r = ["."] * LADDER_W
+        r[0] = r[-1] = "d"
+        r[1] = r[-2] = "l"
+        if y % 5 == 2:
+            r[2:-2] = ["l"] * (LADDER_W - 4)
+        elif y % 5 == 3:
+            r[2:-2] = ["d"] * (LADDER_W - 4)
+        rows.append("".join(r))
+    return rows
+
+
 class Anim:
-    """One traced animation: frames, their timing, and where the idle Clawd
-    stands inside them, so every animation lines up with every other."""
+    """One animation: frames, their timing, and where the idle Clawd stands
+    inside them, so every animation lines up with every other."""
 
     def __init__(self, name, data, palette):
         self.name = name
@@ -149,7 +242,12 @@ class Sprites:
         idle = [r[hx:hx + self.iw] for r in jump["frames"][0]["rows"][hy:hy + self.ih]]
         self.poses = {k: grid_image(pose_rows(idle, k), palette)
                       for k in ("idle", "blink", "look_l", "look_r", "happy")}
-        self.z = [grid_image(g, {"#": Z_RGB}) for g in (Z_SMALL, Z_BIG)]
+        left = climb_rows(idle)
+        right = ["".join(reversed(r)) for r in left]
+        self.anims["climb"] = Anim("climb", {
+            "size": [self.iw, self.ih + 4], "home": [0, 4],
+            "frames": [{"ms": 130, "rows": left}, {"ms": 130, "rows": right}]}, palette)
+        self.glyphs = {k: grid_image(rows, pal) for k, (rows, pal) in GLYPHS.items()}
 
 
 def load_sprites(path=SPRITES):
@@ -198,8 +296,31 @@ def spawn(cmd):
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def open_claude_code():
-    """Open Claude Code in a terminal. Returns False if no terminal was found."""
+def open_url_command(url, platform=None, which=shutil.which):
+    platform = platform or sys.platform
+    if platform == "win32":
+        return ["cmd", "/c", "start", "", url]
+    if platform == "darwin":
+        return ["open", url]
+    return [which("xdg-open") or "xdg-open", url]
+
+
+def claude_app_installed():
+    """Is something registered for claude:// links (the Claude desktop app)?"""
+    if not sys.platform.startswith("linux"):
+        return True
+    if not shutil.which("xdg-mime"):
+        return False
+    try:
+        out = subprocess.run(["xdg-mime", "query", "default", "x-scheme-handler/claude"],
+                             capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return bool(out.strip())
+
+
+def open_in_terminal():
+    """Claude Code in a terminal. Returns False if no terminal was found."""
     if sys.platform == "win32":
         subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", "claude"],
                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -216,11 +337,95 @@ def open_claude_code():
     return True
 
 
+def open_claude_code(kind="continue"):
+    """The Code tab of the Claude app, falling back to a terminal without the app."""
+    if claude_app_installed():
+        cmd = open_url_command(CLAUDE_LINKS[kind])
+        if sys.platform == "win32":
+            subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        else:
+            spawn(cmd)
+        return True
+    return open_in_terminal()
+
+
 def open_claude_web():
     if sys.platform.startswith("linux") and shutil.which("xdg-open"):
         spawn(["xdg-open", "https://claude.ai"])
     else:
         webbrowser.open("https://claude.ai")
+
+
+# ── Where the pointer is ────────────────────────────────────────────
+# Under XWayland an X11 app only sees the pointer while it is over an X11
+# window, so on KDE we ask the compositor itself: a tiny KWin script reports
+# the pointer position to us over D-Bus.
+
+def kwin_cursor_script():
+    return f"""
+let last = {{x: -1e6, y: -1e6}};
+function send() {{
+    const p = workspace.cursorPos;
+    if (Math.abs(p.x - last.x) + Math.abs(p.y - last.y) < 4) return;
+    last = {{x: p.x, y: p.y}};
+    callDBus("{DBUS_SERVICE}", "/Pet", "{DBUS_SERVICE}", "Cursor", p.x + "," + p.y);
+}}
+workspace.cursorPosChanged.connect(send);
+send();
+"""
+
+
+@pyqtClassInfo("D-Bus Interface", DBUS_SERVICE)
+class CursorFeed(QObject):
+    def __init__(self, callback):
+        super().__init__()
+        self._callback = callback
+
+    @pyqtSlot(str)
+    def Cursor(self, pos):                       # noqa: N802 (D-Bus method name)
+        try:
+            x, y = pos.split(",")
+            self._callback(int(float(x)), int(float(y)))
+        except ValueError:
+            pass
+
+
+def start_kwin_cursor_feed(callback):
+    """Start the KWin cursor feed; returns it, or None if this isn't KDE Wayland."""
+    if not (os.environ.get("WAYLAND_DISPLAY") and "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "")):
+        return None
+    try:
+        from PyQt6.QtDBus import QDBusConnection, QDBusInterface
+    except ImportError:
+        return None
+    bus = QDBusConnection.sessionBus()
+    if not bus.isConnected() or not bus.registerService(DBUS_SERVICE):
+        return None
+    feed = CursorFeed(callback)
+    if not bus.registerObject("/Pet", feed, QDBusConnection.RegisterOption.ExportAllSlots):
+        return None
+    path = os.path.join(runtime_dir(), "clawd-pet-cursor.js")
+    with open(path, "w") as f:
+        f.write(kwin_cursor_script())
+    kwin = QDBusInterface("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", bus)
+    if not kwin.isValid():
+        return None
+    kwin.call("unloadScript", KWIN_SCRIPT)
+    args = kwin.call("loadScript", path, KWIN_SCRIPT).arguments()
+    if not args or not isinstance(args[0], int) or args[0] < 0:
+        return None
+    QDBusInterface("org.kde.KWin", f"/Scripting/Script{args[0]}", "org.kde.kwin.Script", bus).call("run")
+    return feed
+
+
+def stop_kwin_cursor_feed():
+    try:
+        from PyQt6.QtDBus import QDBusConnection, QDBusInterface
+    except ImportError:
+        return
+    bus = QDBusConnection.sessionBus()
+    QDBusInterface("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", bus).call(
+        "unloadScript", KWIN_SCRIPT)
 
 
 # ── Screens ─────────────────────────────────────────────────────────
@@ -291,6 +496,37 @@ def _distance(r, x, y):
     return (dx * dx + dy * dy) ** 0.5
 
 
+# ── Props ───────────────────────────────────────────────────────────
+
+class Prop(QWidget):
+    """A click-through overlay for props too big for Clawd's own window (the
+    ladder). `reveal` shows only part of it, growing from the top or bottom."""
+
+    def __init__(self):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint
+                         | Qt.WindowType.Tool
+                         | Qt.WindowType.WindowDoesNotAcceptFocus
+                         | Qt.WindowType.X11BypassWindowManagerHint
+                         | Qt.WindowType.WindowTransparentForInput)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.image = None
+        self.reveal = 1.0
+        self.from_top = False
+
+    def paintEvent(self, _event):
+        if self.image is None:
+            return
+        p = QPainter(self)
+        h = self.height()
+        shown = int(h * self.reveal)
+        top = 0 if self.from_top else h - shown
+        p.drawPixmap(0, top, self.image, 0, top, self.width(), shown)
+        p.end()
+
+
 # ── The pet ─────────────────────────────────────────────────────────
 
 class ClawdPet(QWidget):
@@ -315,6 +551,7 @@ class ClawdPet(QWidget):
                             | Qt.WindowType.X11BypassWindowManagerHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setMouseTracking(True)            # hovering over him counts as the pointer being near
         self.setWindowTitle("Clawd")
 
         scale = DEFAULT_SCALE
@@ -324,14 +561,15 @@ class ClawdPet(QWidget):
         self._pixmaps, self._masks = {}, {}
         self._layout()
 
+        self.now = 0.0                 # ms of simulated time, advanced by advance()
         self.x = self.y = 0.0          # window top-left, as floats for smooth motion
         self.vx = self.vy = 0.0        # px/s
         self.airborne = False
         self.dragging = False
         self.offscreen = False         # lurking: allowed past the screen edge
-        self.scripted = False          # leaping: the behaviour moves him, not physics
+        self.scripted = False          # leaping or climbing: the behaviour moves him, not physics
         self.pad = (0, 0)              # how far the current prop sticks out, in pixels
-        self.particles = []            # sleeping Z's: [x, y, age_ms, glyph]
+        self.particles = []            # Z's, hearts, the "!" bubble
         self.frame = ("pose", "idle", False)
         self.action = None
         self.script = None
@@ -340,6 +578,24 @@ class ClawdPet(QWidget):
         self._trail = []
         self._shown = None
         self._mask = None
+        self.ladder = Prop()
+
+        self.sessions = {}             # Claude Code sessions: state, since, seen
+        self.celebrate = None          # ms of work to celebrate once he's free
+        self.greet = False
+        self.last_message = None
+        self.server = None
+
+        self.cursor = None             # (x, y, when) of the pointer, when known
+        self._poll_cursor = False
+        self._polled = 0.0
+        self._tracking = False
+        self._pet_dir = 0
+        self._pet_flips = []
+        self._petting_until = -1.0
+        self._was_petting = False
+        self._pet_ms = 0.0
+        self._last_heart = -1e9
 
         self._place_initially()
         self.start("idle")
@@ -356,7 +612,7 @@ class ClawdPet(QWidget):
 
     def _layout(self):
         """Size the window to fit every animation, mirrored or not."""
-        left, right, top, bottom = 0, self.iw, 14, self.ih   # 14: room for Z's
+        left, right, top, bottom = 0, self.iw, 14, self.ih   # 14: room for Z's and hearts
         for a in self.sp.anims.values():
             hx, hy = a.home
             for lft in (hx, a.w - hx - self.iw):
@@ -437,21 +693,27 @@ class ClawdPet(QWidget):
             room_r += 300
         return room_l, room_r
 
-    def _leap_target(self):
-        """(side, area) when he's near a seam and the next screen's floor is
-        higher than his, so walking there would hit a wall."""
+    def _seam(self, want, near=300):
+        """A screen edge where the floor steps: "up" when the next screen's floor
+        is higher than his, "down" when it's much lower and carries on at his
+        height. Nearer edges first. Returns (seam x, this area, other area)."""
         geo = self.screen_geometry()
         room_l, room_r = self._room()
-        feet = self._feet()
-        for side, room in ((-1, room_l), (1, room_r)):
-            if room > 300:
+        feet, mid = self._feet(), self._mid()
+        s = self.scale
+        for side, room in sorted(((-1, room_l), (1, room_r)), key=lambda t: t[1]):
+            if near is not None and room > near:
                 continue
-            x = geo.left() - 1 if side < 0 else geo.left() + geo.width()
+            seam = geo.left() if side < 0 else geo.left() + geo.width()
+            probe = seam - 1 if side < 0 else seam
             for a in screen_areas():
+                if a == geo or not a.left() <= probe < a.left() + a.width():
+                    continue
                 floor = a.top() + a.height()
-                if (a != geo and a.left() <= x < a.left() + a.width()
-                        and geo.top() + self.ih * self.scale < floor < feet - 8):
-                    return side, a
+                if want == "up" and geo.top() + self.ih * s < floor < feet - 8:
+                    return seam, geo, a
+                if want == "down" and floor > feet + 2 * self.ih * s and a.top() <= mid <= floor:
+                    return seam, geo, a
         return None
 
     def _place_initially(self):
@@ -480,7 +742,7 @@ class ClawdPet(QWidget):
 
     def set_scale(self, scale):
         left, _ = self.box_span()
-        bottom = self.y + self.home_px.y() + self.ih * self.scale
+        bottom = self._feet()
         self.scale = scale
         self._pixmaps.clear()
         self._masks.clear()
@@ -497,7 +759,7 @@ class ClawdPet(QWidget):
             return
         self.settings.setValue("scale", self.scale)
         self.settings.setValue("left", self.box_span()[0])
-        screen = QApplication.screenAt(QPoint(int(self.box_span()[0]), int(self.y + self.height() / 2)))
+        screen = QApplication.screenAt(QPoint(int(self.box_span()[0]), int(self._mid())))
         if screen is not None:
             self.settings.setValue("screen", screen.name())
 
@@ -508,14 +770,26 @@ class ClawdPet(QWidget):
         self.pad = (0, 0)
         self.offscreen = False
         self.scripted = False
+        if self.ladder.isVisible():
+            self.ladder.hide()                  # interrupted mid-climb: pack it away
         if action != "sleep":
-            self.particles.clear()
+            self.particles = [q for q in self.particles if q["kind"] == "heart"]
         self.action = action
         self.script = getattr(self, "_act_" + action)(**kw)
         self.wait = 0.0
 
     def _next(self):
-        if self.action == "idle":
+        mode = self.claude_mode()
+        if mode == "attention":
+            self.start("attention")
+        elif mode == "busy":
+            self.start("work")
+        elif self.celebrate is not None:
+            self.start("celebrate")
+        elif self.greet:
+            self.greet = False
+            self.start("wave")
+        elif self.action == "idle":
             self.start(self._pick_action())
         else:
             self.start("idle")
@@ -524,8 +798,11 @@ class ClawdPet(QWidget):
         weights = dict(WEIGHTS)
         if self._lurk_side() is None:
             weights["lurk"] = 0
-        if self._leap_target() is not None:
-            weights["leap"] = 25         # otherwise he'd pile up on the lower screen
+        if self._seam("up") is not None:
+            weights["climb"] = 18        # otherwise he'd pile up on the lower screen
+            weights["leap"] = 6
+        elif self._seam("down") is not None:
+            weights["climb"] = 10
         return random.choices(list(weights), weights=list(weights.values()))[0]
 
     def _lurk_side(self):
@@ -543,6 +820,7 @@ class ClawdPet(QWidget):
 
     def advance(self, dt):
         """Move the simulation on by dt milliseconds."""
+        self.now += dt
         if not (self.dragging or self.scripted):
             self._physics(dt)
         self.wait -= dt
@@ -553,6 +831,13 @@ class ClawdPet(QWidget):
                 self.wait += next(self.script)
             except StopIteration:
                 self._next()
+        if self._poll_cursor and self.now - self._polled > 100:
+            self._polled = self.now
+            p = QCursor.pos()
+            if self.cursor is None or (p.x(), p.y()) != self.cursor[:2]:
+                self.cursor_moved(p.x(), p.y())
+        self._petting(dt)
+        self._watch_cursor()
         self._age_particles(dt)
         if (int(self.x), int(self.y)) != (self.pos().x(), self.pos().y()):
             self.move(int(self.x), int(self.y))
@@ -599,6 +884,173 @@ class ClawdPet(QWidget):
                 self.x = lo
                 self.vx = abs(self.vx) * 0.4 if bounce else 0.0
 
+    # ── Claude Code ───────────────────────────────────────────────
+
+    def listen(self, path=None):
+        """Accept messages from clawd_hook.py (and play/status commands)."""
+        path = path or socket_path()
+        QLocalServer.removeServer(path)
+        self.server = QLocalServer(self)
+        self.server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
+        if not self.server.listen(path):
+            return False
+        self.server.newConnection.connect(self._accept)
+        return True
+
+    def _accept(self):
+        while self.server.hasPendingConnections():
+            conn = self.server.nextPendingConnection()
+            conn.pending = b""
+            conn.readyRead.connect(lambda c=conn: self._read(c))
+            conn.disconnected.connect(conn.deleteLater)
+
+    def _read(self, conn):
+        conn.pending += bytes(conn.readAll())
+        *lines, conn.pending = conn.pending.split(b"\n")
+        for line in lines:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("cmd") == "play" and msg.get("action") in PLAYABLE:
+                self.start(msg["action"])
+            elif msg.get("cmd") == "status":
+                conn.write((json.dumps(self.status()) + "\n").encode())
+                conn.flush()
+            elif "event" in msg:
+                self.claude_event(msg)
+
+    def status(self):
+        left, _ = self.box_span()
+        geo = self.screen_geometry()
+        return {"action": self.action, "frame": list(self.frame), "box_left": round(left),
+                "feet": round(self._feet()), "screen": [geo.left(), geo.top(), geo.width(), geo.height()],
+                "mode": self.claude_mode(), "cursor": list(self.cursor) if self.cursor else None,
+                "ladder": self.ladder.isVisible(), "scale": self.scale}
+
+    def claude_event(self, msg):
+        self.last_message = msg
+        ev, sid = msg.get("event", ""), msg.get("session") or "?"
+        s = self.sessions.setdefault(sid, {"state": "idle", "since": self.now, "seen": self.now})
+        s["seen"] = self.now
+        if ev in BUSY_EVENTS:
+            if s["state"] != "busy":
+                s["since"] = self.now
+            s["state"] = "busy"
+        elif ev == "PermissionRequest" or (ev == "Notification" and (
+                msg.get("kind") in ATTENTION_KINDS or (not msg.get("kind") and s["state"] == "busy"))):
+            s["state"] = "waiting"
+        elif ev in ("Stop", "StopFailure"):
+            if ev == "Stop" and s["state"] != "idle":
+                self.celebrate = self.now - s["since"]
+            s["state"] = "idle"
+        elif ev == "SessionStart":
+            self.greet = True
+        elif ev == "SessionEnd":
+            self.sessions.pop(sid, None)
+        self._react()
+
+    def claude_mode(self):
+        """"attention" if a session waits on you, "busy" if one is working, else None."""
+        mode = None
+        for s in self.sessions.values():
+            age = self.now - s["seen"]
+            if (s["state"] == "busy" and age > 15 * 60_000) or (s["state"] == "waiting" and age > 30 * 60_000):
+                s["state"] = "idle"                 # forgotten: Claude Code was probably closed
+            if s["state"] == "waiting":
+                return "attention"
+            if s["state"] == "busy":
+                mode = "busy"
+        return mode
+
+    def _react(self):
+        """Switch to what Claude Code needs now, unless he's in the middle of something physical."""
+        if (self.dragging or self.airborne or self.scripted
+                or self.action in ("held", "fall", "climb", "leap")):
+            return                                  # _next() catches up when he's back on his feet
+        mode = self.claude_mode()
+        if mode == "attention" and self.action != "attention":
+            self.start("attention")
+        elif mode == "busy" and self.action not in ("work", "attention"):
+            self.start("work")
+        elif mode is None and self.greet and self.action == "idle":
+            self.greet = False
+            self.start("wave")
+
+    def click_kind(self):
+        return "needs-input" if self.claude_mode() == "attention" else "continue"
+
+    def click_link(self):
+        return CLAUDE_LINKS[self.click_kind()]
+
+    # ── The pointer ───────────────────────────────────────────────
+
+    def cursor_moved(self, x, y):
+        prev = self.cursor
+        self.cursor = (x, y, self.now)
+        left, right = self.box_span()
+        top = self.y + self.home_px.y()
+        m = 2 * self.scale
+        over = left - m <= x <= right + m and top - m <= y <= top + self.ih * self.scale + m
+        if over and prev is not None and self.now - prev[2] < 400 and abs(x - prev[0]) >= 3:
+            d = 1 if x > prev[0] else -1
+            if self._pet_dir and d != self._pet_dir:
+                self._pet_flips.append(self.now)
+            self._pet_dir = d
+        self._pet_flips = [t for t in self._pet_flips if self.now - t < 1500]
+        if over and len(self._pet_flips) >= 3:      # stroked back and forth: petting
+            self._petting_until = self.now + 500
+
+    def _petting(self, dt):
+        petting = self.now < self._petting_until
+        if petting:
+            self._pet_ms += dt
+            if self.now - self._last_heart > 320:
+                self._last_heart = self.now
+                self._emit("heart", self.iw / 2 - 2 + random.uniform(-6, 6), -3.0,
+                           vx=random.uniform(-1, 1), vy=-4.0, life=1400)
+            if self.action == "idle" and self.frame[0] == "pose":
+                self.pose("happy")
+            if self._pet_ms > 3500 and self.action == "idle":
+                self._pet_ms = 0.0
+                self.start("dance")                 # he loves it
+        else:
+            self._pet_ms = max(0.0, self._pet_ms - dt)
+            if self._was_petting and self.action == "idle" and self.frame == ("pose", "happy", False):
+                self.pose("idle")
+        self._was_petting = petting
+
+    def _watch_cursor(self):
+        """While idle, follow a nearby, moving pointer with his eyes."""
+        if self.action != "idle" or self.frame[0] != "pose" or self.now < self._petting_until:
+            self._tracking = False
+            return
+        eyes = None
+        if self.cursor is not None and self.now - self.cursor[2] < 2500:
+            x, y, _ = self.cursor
+            left, right = self.box_span()
+            cx, cy = (left + right) / 2, self._mid()
+            near = CURSOR_NEAR * self.scale
+            if abs(x - cx) < near and abs(y - cy) < near:
+                half = self.iw * self.scale / 2
+                eyes = "look_l" if x < cx - half else "look_r" if x > cx + half else "idle"
+        if eyes is not None:
+            if self.frame[1] in ("idle", "look_l", "look_r"):
+                self.frame = ("pose", eyes, False)
+            self._tracking = True
+        elif self._tracking:
+            self._tracking = False
+            if self.frame[1] in ("look_l", "look_r"):
+                self.frame = ("pose", "idle", False)
+
+    def _glance(self):
+        """Which way to look: usually toward the pointer, if we know where it is."""
+        if self.cursor is not None and random.random() < 0.7:
+            return "look_l" if self.cursor[0] < sum(self.box_span()) / 2 else "look_r"
+        return random.choice(("look_l", "look_r"))
+
     # ── What to show ──────────────────────────────────────────────
 
     def show_frame(self, name, idx, mirror=False):
@@ -606,6 +1058,30 @@ class ClawdPet(QWidget):
 
     def pose(self, name):
         self.frame = ("pose", name, False)
+
+    def _emit(self, kind, x, y, vx=0.0, vy=0.0, life=3000.0):
+        self.particles.append({"kind": kind, "x": x, "y": y, "y0": y, "age": 0.0,
+                               "life": life, "vx": vx, "vy": vy})
+
+    def _bubble(self, on):
+        self.particles = [q for q in self.particles if q["kind"] != "bubble"]
+        if on:
+            self._emit("bubble", self.iw - 8, -13.0, life=float("inf"))
+
+    def _age_particles(self, dt):
+        for q in self.particles:
+            q["age"] += dt
+            if q["kind"] == "bubble":
+                q["y"] = q["y0"] - (q["age"] // 400) % 2      # a gentle bob
+            else:
+                q["x"] += q["vx"] * dt / 1000
+                q["y"] += q["vy"] * dt / 1000
+        self.particles = [q for q in self.particles if q["age"] < q["life"]]
+
+    def _fade(self, q):
+        if q["life"] == float("inf"):
+            return 1.0
+        return max(0.0, min(1.0, round((q["life"] - q["age"]) / 800 * 4) / 4))
 
     def _pixmap(self, key):
         pm = self._pixmaps.get(key)
@@ -625,11 +1101,16 @@ class ClawdPet(QWidget):
             return self.frame_rect(self.sp.anims[key[1]], key[2], key[3]).topLeft()
         return self.home_px
 
+    def _glyph_rect(self, q):
+        s = self.scale
+        g = self.sp.glyphs[q["kind"]]
+        return QRect(self.home_px.x() + int(q["x"]) * s, self.home_px.y() + int(q["y"]) * s,
+                     g.width() * s, g.height() * s)
+
     def _refresh(self):
         """Repaint (and re-shape the window) only when something visible changed."""
-        s = self.scale
-        zs = tuple((int(p[0]), int(p[1]), int(p[2] // 500), p[3]) for p in self.particles)
-        state = (self.frame, zs)
+        state = (self.frame, tuple((q["kind"], int(q["x"]), int(q["y"]), self._fade(q))
+                                   for q in self.particles))
         if state == self._shown:
             return
         mask = self._masks.get(self.frame)
@@ -637,15 +1118,13 @@ class ClawdPet(QWidget):
             bitmap = QBitmap.fromImage(self._pixmap(self.frame).toImage().createAlphaMask())
             mask = QRegion(bitmap).translated(self._frame_pos(self.frame))
             self._masks[self.frame] = mask
-        for x, y, _, glyph in self.particles:
-            z = self.sp.z[glyph]
-            mask = mask.united(QRect(self.home_px.x() + int(x) * s, self.home_px.y() + int(y) * s,
-                                     z.width() * s, z.height() * s))
+        for q in self.particles:
+            mask = mask.united(self._glyph_rect(q))
         if mask.isEmpty():
             mask = QRegion(0, 0, 1, 1)           # an empty mask would mean "no mask"
-        # The window is shaped to Clawd (plus his Z's): the empty space around
-        # him lets clicks through to whatever is behind. The shape clips
-        # painting too, which is why the Z's have to be part of it.
+        # The window is shaped to Clawd (plus his Z's, hearts and bubble): the
+        # empty space around him lets clicks through to whatever is behind.
+        # The shape clips painting too, which is why the extras are part of it.
         if mask != self._mask:
             self.setMask(mask)
             self._mask = mask
@@ -654,12 +1133,9 @@ class ClawdPet(QWidget):
 
     def paint(self, p):
         p.drawPixmap(self._frame_pos(self.frame), self._pixmap(self.frame))
-        s = self.scale
-        for x, y, age, glyph in self.particles:
-            p.setOpacity(max(0.0, 1.0 - (age // 500) * 500 / 3000))
-            z = self.sp.z[glyph]
-            p.drawImage(QRect(self.home_px.x() + int(x) * s, self.home_px.y() + int(y) * s,
-                              z.width() * s, z.height() * s), z)
+        for q in self.particles:
+            p.setOpacity(self._fade(q))
+            p.drawImage(self._glyph_rect(q), self.sp.glyphs[q["kind"]])
         p.setOpacity(1.0)
 
     def paintEvent(self, _event):
@@ -676,13 +1152,6 @@ class ClawdPet(QWidget):
         p.end()
         return img
 
-    def _age_particles(self, dt):
-        for p in self.particles:
-            p[2] += dt
-            p[1] -= dt / 1000 * 2.0          # rise two pixels a second
-            p[0] += dt / 1000 * 0.7
-        self.particles = [p for p in self.particles if p[2] < 3000]
-
     # ── Behaviours ────────────────────────────────────────────────
 
     def _play(self, name, frames, mirror=False):
@@ -691,14 +1160,14 @@ class ClawdPet(QWidget):
             self.show_frame(name, i, mirror)
             yield a.ms[i]
 
-    def _loop(self, name, mirror=False):
+    def _loop(self, name, mirror=False, tempo=1.0):
         """The animation's loop segment, forever (the caller decides when to stop)."""
         a = self.sp.anims[name]
         lo, hi = a.loop
         while True:
             for i in range(lo, hi + 1):
                 self.show_frame(name, i, mirror)
-                yield a.ms[i]
+                yield a.ms[i] * tempo
 
     def _mirror_for(self, name):
         """Face whichever way keeps the animation on screen."""
@@ -707,30 +1176,32 @@ class ClawdPet(QWidget):
             return False
         return self._pads(name, True)[0] <= room_l
 
-    def _act_idle(self):
-        self.pose("idle")
-        yield 0
+    def _come_back(self):
+        """If he was left partly off-screen (a peek got interrupted), walk back into view."""
         left, right = self.box_span()
         geo = self.screen_geometry()
         if left < geo.left() or right > geo.left() + geo.width():
-            # interrupted while peeking from off-screen: walk back into view
             yield from self._walk_to(min(max(left, geo.left() + 20),
                                          geo.left() + geo.width() - self.iw * self.scale - 20))
             self.pose("idle")
+
+    def _act_idle(self):
+        self.pose("idle")
+        yield from self._come_back()
         end, t = random.uniform(5000, 14000), 0.0
         while t < end:
             hold = random.uniform(1500, 4000)
             yield hold
             t += hold
             r = random.random()
-            if r < 0.6:
+            if r < 0.5:
                 for _ in range(2 if random.random() < 0.2 else 1):
                     self.pose("blink")
                     yield 110
                     self.pose("idle")
                     yield 150
-            elif r < 0.9:
-                self.pose(random.choice(("look_l", "look_r")))
+            elif r < 0.88:
+                self.pose(self._glance())
                 look = random.uniform(500, 1400)
                 yield look
                 t += look
@@ -741,11 +1212,11 @@ class ClawdPet(QWidget):
                 t += 900
                 self.pose("idle")
 
-    def _walk_to(self, target, speed=WALK_SPEED):
+    def _walk_to(self, target, speed=WALK_SPEED, tempo=WALK_TEMPO):
         """Crab-walk until the idle pose's left edge reaches `target`."""
         direction = 1 if target > self.box_span()[0] else -1
         self.vx = direction * speed * self.scale
-        steps = self._loop("walk", mirror=direction < 0)
+        steps = self._loop("walk", mirror=direction < 0, tempo=tempo)
         while self.vx and (target - self.box_span()[0]) * direction > 0:
             yield next(steps)
         self.vx = 0.0
@@ -753,11 +1224,13 @@ class ClawdPet(QWidget):
             self.set_box_left(target)
 
     def _act_walk(self, target=None):
+        speed, tempo = WALK_SPEED, WALK_TEMPO
         if target is None:
             if random.random() < 0.25 and len(screen_areas()) > 1:
                 # a trip: anywhere on the desktop, across screens if need be
                 a = random.choice(screen_areas())
                 target = a.left() + random.uniform(0, a.width() - self.iw * self.scale)
+                speed, tempo = TRIP_SPEED, TRIP_TEMPO
             else:
                 room_l, room_r = self._reach()
                 direction = 1 if random.uniform(0, room_l + room_r) < room_r else -1
@@ -767,46 +1240,32 @@ class ClawdPet(QWidget):
                     return
                 target = self.box_span()[0] + direction * dist
         for _ in range(4):                 # a few seams at most
-            yield from self._walk_to(target)
+            yield from self._walk_to(target, speed, tempo)
             left = self.box_span()[0]
             if abs(left - target) < 4:
                 return
-            # Stopped short: a wall. Leap if a higher screen is what's in the way.
-            leap = self._leap_target()
-            if leap is None or leap[0] != (1 if target > left else -1):
+            # Stopped short: a wall. If a higher screen is what's in the way,
+            # get up there (by ladder, mostly).
+            seam = self._seam("up")
+            if seam is None or (seam[0] > left) != (target > left):
                 return
-            yield from self._act_leap()
+            yield from (self._act_climb() if random.random() < 0.7 else self._act_leap())
 
-    def _act_leap(self):
-        """Jump up onto the higher screen next to this one."""
-        target = self._leap_target()
-        if target is None:
-            return
-        side, area = target
+    def _arc_to(self, box_left, floor, peak, hold=False):
+        """A hop under real GRAVITY landing with his box at `box_left` and his
+        feet on `floor`, peaking `peak` px above the higher end. Going up, he
+        only drifts sideways once his feet have risen past the landing height,
+        so he never clips the corner where two screens meet."""
         s = self.scale
-        width = self.iw * s
-        geo = self.screen_geometry()
-        seam = geo.left() if side < 0 else geo.left() + geo.width()
-        # run up to just short of the seam
-        yield from self._walk_to(seam + 3 * s if side < 0 else seam - width - 3 * s)
-        self.pose("idle")
-        yield 200
-        land = random.uniform(10, 40) * s
-        x0, y0 = self.x, self.y
-        x1 = (seam + land if side > 0 else seam - width - land) - self.home_px.x()
-        y1 = area.top() + area.height() - self.home_px.y() - self.ih * s
-        # A real ballistic arc under GRAVITY, peaking a little above the new floor.
         g = GRAVITY * s
-        apex = min(y0, y1) - 10 * s
+        x0, y0 = self.x, self.y
+        x1 = box_left - self.home_px.x()
+        y1 = floor - self.home_px.y() - self.ih * s
+        apex = min(y0, y1) - peak
         t_up = (2 * (y0 - apex) / g) ** 0.5
         t_down = (2 * (y1 - apex) / g) ** 0.5
         total = t_up + t_down
-        # No sideways drift until his feet are above the floor he's aiming
-        # for, so he never clips the corner where the screens meet.
         t_clear = t_up - t_down if y1 < y0 else 0.0
-        self.show_frame("jump", 1)           # crouch
-        yield 120
-        self.show_frame("jump", 2)           # arms up
         self.scripted = True
         t = 0.0
         while t < total:
@@ -819,8 +1278,111 @@ class ClawdPet(QWidget):
             u = 0.0 if t <= t_clear else (t - t_clear) / (total - t_clear)
             self.x = x0 + (x1 - x0) * u * u * (3 - 2 * u)
         self.x, self.y = x1, y1
-        self.scripted = False
+        self.scripted = hold
+
+    def _act_leap(self):
+        """Jump up onto the higher screen next to this one."""
+        seam = self._seam("up")
+        if seam is None:
+            return
+        x, _, other = seam
+        s = self.scale
+        width = self.iw * s
+        side = 1 if other.left() >= x else -1
+        yield from self._walk_to(x - width - 3 * s if side > 0 else x + 3 * s)
+        self.pose("idle")
+        yield 200
+        land = random.uniform(10, 40) * s
+        self.show_frame("jump", 1)           # crouch
+        yield 120
+        self.show_frame("jump", 2)           # arms up
+        yield from self._arc_to(x + land if side > 0 else x - width - land,
+                                other.top() + other.height(), 10 * s)
         yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
+
+    def _act_climb(self):
+        """Pull out a ladder and climb to the neighbouring screen, up or down."""
+        left = self.box_span()[0]
+        options = [(abs(seam[0] - left), seam, up)
+                   for seam, up in ((self._seam("up", near=None), True), (self._seam("down", near=None), False))
+                   if seam is not None]
+        if not options:
+            return
+        _, (seam, here, other), up = min(options, key=lambda o: o[0])
+        s = self.scale
+        width, lw = self.iw * s, LADDER_W * s
+        lower, upper = (here, other) if up else (other, here)
+        low = lower.top() + lower.height()
+        high = upper.top() + upper.height()
+        lower_left = lower.left() < seam            # is the lower screen left of the seam?
+        # The ladder stands on the lower screen by the seam, just far enough
+        # in that Clawd (wider than it) fits on it without poking past the
+        # edge, and pokes up a little past the higher floor like a real one.
+        margin = s + (width - lw) / 2
+        ladder_x = seam - margin - lw if lower_left else seam + margin
+        on_ladder = ladder_x + lw / 2 - width / 2
+        rect = QRect(int(ladder_x), int(high - 5 * s), lw, int(low - high + 5 * s))
+        if up:
+            yield from self._walk_to(on_ladder)
+            self.pose("idle")
+            yield 250
+            yield from self._ladder_out(rect, from_top=False)
+            yield from self._climb_to(high)
+            self.show_frame("jump", 2)
+            yield from self._arc_to(seam + 4 * s if lower_left else seam - width - 4 * s, high, 4 * s)
+        else:
+            yield from self._walk_to(seam + s if lower_left else seam - width - s)
+            self.pose("idle")
+            yield 250
+            yield from self._ladder_out(rect, from_top=True)
+            self.show_frame("jump", 2)
+            yield from self._arc_to(on_ladder, high, 3 * s, hold=True)
+            yield from self._climb_to(low)
+            self.scripted = False
+        self.pose("idle")
+        yield from self._ladder_in()
+
+    def _ladder_out(self, rect, from_top):
+        s = self.scale
+        img = grid_image(ladder_rows(max(1, rect.height() // s)), LADDER_PALETTE)
+        pm = QPixmap.fromImage(img.scaled(img.width() * s, img.height() * s,
+                                          Qt.AspectRatioMode.IgnoreAspectRatio,
+                                          Qt.TransformationMode.FastTransformation))
+        self.ladder.image = pm
+        self.ladder.from_top = from_top
+        self.ladder.reveal = 0.0
+        # feet of the ladder exactly on the lower floor
+        self.ladder.setGeometry(rect.x(), rect.y() + rect.height() - pm.height(), pm.width(), pm.height())
+        self.ladder.show()
+        self.raise_()                            # Clawd climbs in front of it
+        for k in range(1, 13):                   # it telescopes out
+            self.ladder.reveal = k / 12
+            self.ladder.update()
+            yield 35
+
+    def _ladder_in(self):
+        for k in range(11, -1, -1):
+            self.ladder.reveal = k / 12
+            self.ladder.update()
+            yield 30
+        self.ladder.hide()
+
+    def _climb_to(self, feet):
+        """Hand over hand up (or down) the ladder until his feet are at `feet`."""
+        s = self.scale
+        target = feet - self.home_px.y() - self.ih * s
+        direction = -1 if target < self.y else 1
+        self.scripted = True
+        i = 0
+        while (target - self.y) * direction > 0.5:
+            self.show_frame("climb", i % 2)
+            i += 1
+            for _ in range(8):                   # about 130 ms per hand-over-hand step
+                yield TICK_MS
+                self.y += direction * CLIMB_SPEED * s * TICK_MS / 1000
+                if (target - self.y) * direction <= 0:
+                    break
+        self.y = target
 
     def _ride(self, name, speed):
         room_l, room_r = self._room()
@@ -852,18 +1414,40 @@ class ClawdPet(QWidget):
     def _act_race(self):
         yield from self._ride("race", RACE_SPEED)
 
-    def _act_laptop(self):
+    def _act_laptop(self, until_idle=False):
         mirror = self._mirror_for("laptop")
         self.pad = self._pads("laptop", mirror)
         a = self.sp.anims["laptop"]
         yield from self._play("laptop", range(0, a.loop[0]), mirror)
         steps, typed, end = self._loop("laptop", mirror), 0.0, random.uniform(3000, 9000)
-        while typed < end:
+        while (self.claude_mode() == "busy") if until_idle else typed < end:
             ms = next(steps)
             typed += ms
             yield ms
         c, d = a.outro
         yield from self._play("laptop", range(c, d + 1), mirror)
+
+    def _act_work(self):
+        """Typing on the laptop for as long as Claude Code is busy."""
+        yield from self._come_back()
+        yield from self._act_laptop(until_idle=True)
+
+    def _act_attention(self):
+        """Claude Code needs you: wave with a "!" until it's answered."""
+        yield from self._come_back()
+        self._bubble(True)
+        while self.claude_mode() == "attention":
+            yield from self._once("wave")
+            self.pose("idle")
+            t = 0
+            while t < 2500 and self.claude_mode() == "attention":
+                yield 100
+                t += 100
+        self._bubble(False)
+
+    def _act_celebrate(self):
+        took, self.celebrate = self.celebrate or 0, None
+        yield from self._once("sparkler" if took > 90_000 else "jump_happy")
 
     def _act_dance(self):
         a = self.sp.anims["dance"]
@@ -914,7 +1498,8 @@ class ClawdPet(QWidget):
         end, t, n = random.uniform(20000, 60000), 0.0, 0
         while t < end:
             n += 1
-            self.particles.append([self.iw - 6 + random.random() * 2, -1.0, 0.0, n % 2])
+            self._emit("z_big" if n % 2 else "z_small", self.iw - 6 + random.random() * 2, -1.0,
+                       vx=0.7, vy=-2.0, life=3000)
             yield 1300
             t += 1300
         self.pose("idle")
@@ -947,9 +1532,10 @@ class ClawdPet(QWidget):
         e.accept()
 
     def mouseMoveEvent(self, e):
-        if self._press is None:
-            return
         pos = e.globalPosition().toPoint()
+        if self._press is None:
+            self.cursor_moved(pos.x(), pos.y())  # just hovering: maybe a stroke
+            return
         if not self.dragging and (pos - self._press).manhattanLength() > 6:
             self.dragging = True
             self.airborne = False
@@ -974,24 +1560,34 @@ class ClawdPet(QWidget):
             self.drop(vx, vy)
         elif not self.airborne:
             waking = self.action == "sleep"
-            self.start("jump_happy")
+            kind = self.click_kind()
+            if self.action not in ("work", "attention"):
+                self.start("jump_happy")
             if not waking:                         # a click on a sleeping Clawd just wakes him
-                self.launch_claude_code()
+                self.launch_claude_code(kind)
         self._press = None
         e.accept()
 
-    def launch_claude_code(self):
-        if not open_claude_code() and getattr(self, "tray", None) is not None:
+    def launch_claude_code(self, kind="continue"):
+        if not open_claude_code(kind) and getattr(self, "tray", None) is not None:
+            self.tray.showMessage("Clawd", "No terminal found to run Claude Code in.")
+
+    def launch_terminal(self):
+        if not open_in_terminal() and getattr(self, "tray", None) is not None:
             self.tray.showMessage("Clawd", "No terminal found to run Claude Code in.")
 
     # ── Menus ─────────────────────────────────────────────────────
 
     def fill_menu(self, m):
-        m.addAction("Open Claude Code").triggered.connect(lambda _=False: self.launch_claude_code())
+        m.addAction("Open Claude Code").triggered.connect(
+            lambda _=False: self.launch_claude_code(self.click_kind()))
+        m.addAction("New Claude Code session").triggered.connect(
+            lambda _=False: self.launch_claude_code("new"))
+        m.addAction("Claude Code in a terminal").triggered.connect(lambda _=False: self.launch_terminal())
         m.addAction("Open claude.ai").triggered.connect(lambda _=False: open_claude_web())
         m.addSeparator()
         play = m.addMenu("Play")
-        for key in ACTIONS:
+        for key in ACTIONS + BETWEEN_SCREENS:
             play.addAction(LABELS[key]).triggered.connect(lambda _=False, k=key: self.start(k))
         size = m.addMenu("Size")
         group = QActionGroup(size)
@@ -1030,6 +1626,11 @@ def main():
     settings = QSettings("clawd-pet", "clawd-pet")
     pet = ClawdPet(sprites, settings)
     pet.show()
+    pet.listen()
+    feed = start_kwin_cursor_feed(pet.cursor_moved)
+    pet._poll_cursor = feed is None
+    if feed is not None:
+        app.aboutToQuit.connect(stop_kwin_cursor_feed)
 
     if QSystemTrayIcon.isSystemTrayAvailable():
         tray = QSystemTrayIcon(tray_icon(sprites), app)
