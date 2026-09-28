@@ -1812,7 +1812,6 @@ class GrabThePointer(unittest.TestCase):
                 break
             tip = QPoint(px - int(self.pet.x), py - int(self.pet.y))
             self.assertFalse(self.pet._mask.contains(tip), (k, px, py))
-            self.assertGreater(self.pet._mask.boundingRect().top(), tip.y(), (k, px, py))
 
     def test_he_swings_behind_when_you_pull_him_along(self):
         x, y = self.hang_on()
@@ -1828,6 +1827,77 @@ class GrabThePointer(unittest.TestCase):
         self.assertTrue(all((-1 if f[3] else 1) * self.pet.sp.dangle_lean < 0 for f in leans), leans)
         run_ms(self.pet, 3000)                                # it stops: he settles under it
         self.assertLess(abs(self.pet._swing), 0.14)
+
+    def circle(self, x, y, radius, turns_per_s, ms, clockwise=False):
+        """Swing the pointer round in circles around (x, y)."""
+        seen, total, last = [], 0.0, self.pet._swing
+        for k in range(int(ms / 16)):
+            a = 2 * math.pi * turns_per_s * k * 0.016 * (-1 if clockwise else 1)
+            self.pet.cursor_moved(int(x + radius * math.cos(a)), int(y + radius * math.sin(a)))
+            self.pet.advance(16)
+            if not self.pet._dangling:
+                break
+            d = (self.pet._swing - last + math.pi) % (2 * math.pi) - math.pi
+            total += d
+            last = self.pet._swing
+            seen.append((self.pet.frame, self.pet._swing))
+        return seen, total
+
+    def test_whirl_the_pointer_round_and_he_goes_all_the_way_round(self):
+        x, y = self.hang_on()
+        seen, total = self.circle(x, y, 70, 1.6, 4000)
+        self.assertGreater(abs(total), 2 * math.pi)            # at least one full turn
+        self.assertTrue(any(f[1].startswith("spin") for f, _ in seen))
+        self.assertTrue(any(abs(abs(sw) - math.pi) < 0.4 for _, sw in seen))   # over the top
+
+    def test_while_he_spins_clicks_still_go_past_him(self):
+        x, y = self.hang_on()
+        self.pet.catcher = cp.DropCatcher(self.pet)
+        self.pet.show()
+        for k in range(int(4000 / 16)):
+            a = 2 * math.pi * 1.6 * k * 0.016
+            px, py = int(x + 70 * math.cos(a)), int(y + 70 * math.sin(a))
+            self.pet.cursor_moved(px, py)
+            self.pet.advance(16)
+            if not self.pet._dangling:
+                break
+            tip = QPoint(px - int(self.pet.x), py - int(self.pet.y))
+            self.assertFalse(self.pet._mask.contains(tip), k)
+            self.assertFalse(self.pet.catcher.mask().contains(tip), k)
+        self.pet.catcher.deleteLater()
+        self.pet.hide()
+
+    def test_spinning_frames_turn_about_his_hands(self):
+        grip = None
+        for k in range(len(self.pet.sp.anims["spin_happy"].frames)):
+            for mirror in (False, True):
+                self.pet.frame = ("anim", "spin_happy", k, mirror)
+                g = self.pet._grip_in_window()
+                grip = grip or g
+                self.assertEqual(g, grip)
+        self.pet.frame = ("anim", "dangle", cp.STRAIGHT, False)
+        self.assertEqual(self.pet._grip_in_window(), grip)
+
+    def test_a_good_spin_leaves_him_dizzy(self):
+        x, y = self.hang_on()
+        _, total = self.circle(x, y, 70, 1.6, 4000)
+        self.assertGreater(abs(total), 4 * math.pi)
+        self.pet.cursor_moved(x, y)                            # stop: he swings down, dizzy
+        stars = lambda: any(q.get("orbit") for q in self.pet.particles)
+        self.assertTrue(run_ms(self.pet, 6000, until=stars))
+
+    def test_let_go_mid_spin_and_he_flies(self):
+        x, y = self.hang_on()
+        for k in range(int(5000 / 16)):                       # whirl until he's really going
+            a = 2 * math.pi * 1.6 * k * 0.016
+            self.pet.cursor_moved(int(x + 70 * math.cos(a)), int(y + 70 * math.sin(a)))
+            if abs(self.pet._swing_v) > 6:
+                self.pet._release = True
+            self.pet.advance(16)
+            if not self.pet._dangling:
+                break
+        self.assertFalse(self.pet._dangling)
+        self.assertGreater(abs(self.pet.vx) + abs(self.pet.vy), 200)
 
     def test_shake_him_off(self):
         x, y = self.hang_on()

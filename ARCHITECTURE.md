@@ -165,8 +165,15 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
 - `cursor_moved()` repositions him the moment the pointer moves, not at the next tick.
   The KWin script reports the pointer every 2 px within 400 px of him (found through his
   drop catcher) and only every 24 px further away
-- Swing: a pendulum driven by the grip's horizontal acceleration, damped, picks the
-  straight / lean_1 / lean_2 frame (mirrored for the other side); calm spells get leg kicks
+- Swing: a pendulum on a moving pivot, driven by the grip's acceleration both ways
+  (theta'' = -((g - a_y) sin theta + a_x cos theta) / L - damping), in 4 substeps a tick and
+  free to go all the way round. Up to `SPIN_FROM` it uses the hand-drawn straight / lean_1 /
+  lean_2 frames (mirrored for the other side, kicks when calm); past that, `spin_*` frames:
+  his straight hang turned about his hands in `SPIN_STEPS` steps by `turned_frames()`
+  (RotSprite-style: Scale2x three times, turn, sample back onto the cell grid), built when
+  the sprites load. Four half-turns within a few seconds leave him dizzy (orbiting stars)
+- Turned over the top he'd be over the pointer's tip, so while he dangles his shape has a
+  7 px hole at the tip (under the arrow anyway) and the drop catcher shrinks to 1 px
 - Faces are redrawn per frame by `eyes_rows()` at the eye cells the art gives
 - Shake: `SHAKE_FLIPS` direction changes faster than `SHAKE_SPEED` within `SHAKE_MS`
 

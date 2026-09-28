@@ -275,6 +275,9 @@ SHAKE_FLIPS = 4               # quick back-and-forths within SHAKE_MS shake him 
 SHAKE_MS = 1300
 SHAKE_SPEED = 700             # px/s: how fast a move must be to count toward a shake
 STRAIGHT, LEAN_1, LEAN_2, KICK_A, KICK_B, ONE_HAND = range(6)   # the dangle frames
+SPIN_STEPS = 24               # frames all the way round when you whirl him (15 degrees apart)
+SPIN_FROM = 0.52              # radians: past this he's drawn turned, not in the hand-drawn leans
+SWING_DAMP = 1.5              # 1/s: how quickly his swinging dies down
 AWAY = 10 * 60_000            # no pointer movement or prompt for this long: you're away (a break)
 PRESENT = 90_000              # reminders only come while you've done something this recently
 REMIND_LOUD = 120_000         # a reminder's first two minutes are loud; then he just holds it up
@@ -531,6 +534,53 @@ def eyes_rows(rows, eyes, kind, body, ink):
     return ["".join(r) for r in g]
 
 
+def scale2x(g):
+    """Scale2x (EPX): twice the size, smoothing stair-steps without new colours."""
+    h, w = len(g), len(g[0])
+    out = [[None] * (2 * w) for _ in range(2 * h)]
+    for y in range(h):
+        up, row, down = g[y - 1] if y else g[y], g[y], g[y + 1] if y + 1 < h else g[y]
+        top, bottom = out[2 * y], out[2 * y + 1]
+        for x in range(w):
+            p, a, d = row[x], up[x], down[x]
+            c = row[x - 1] if x else p
+            b = row[x + 1] if x + 1 < w else p
+            top[2 * x] = a if c == a and c != d and a != b else p
+            top[2 * x + 1] = b if a == b and a != c and b != d else p
+            bottom[2 * x] = c if d == c and d != b and c != a else p
+            bottom[2 * x + 1] = d if b == d and b != a and d != c else p
+    return out
+
+
+def turned_frames(rows, pivot, steps, size):
+    """`rows` turned all the way round about `pivot` (cells) in `steps` steps,
+    RotSprite-style: scaled up 8x with Scale2x, turned, and sampled back onto
+    the cell grid, so he stays crisp pixel art at any angle. Angle k*360/steps
+    swings what hangs below the pivot out to the right; each frame is size x
+    size cells with the pivot at its centre."""
+    up = [list(r) for r in rows]
+    for _ in range(3):
+        up = scale2x(up)
+    h8, w8, half = len(up), len(up[0]), size / 2
+    px, py = pivot
+    frames = []
+    for k in range(steps):
+        a = 2 * math.pi * k / steps
+        c, sn = math.cos(a), math.sin(a)
+        out = []
+        for oy in range(size):
+            dy = oy + 0.5 - half
+            line = []
+            for ox in range(size):
+                dx = ox + 0.5 - half
+                x = int(math.floor((c * dx - sn * dy + px) * 8))
+                y = int(math.floor((sn * dx + c * dy + py) * 8))
+                line.append(up[y][x] if 0 <= x < w8 and 0 <= y < h8 else ".")
+            out.append("".join(line))
+        frames.append(out)
+    return frames
+
+
 def cursor_grip(path=os.path.expanduser("~/.config/kcminputrc")):
     """Where on the pointer he holds on, from its tip: the tail of the arrow
     (measured on Breeze's arrow: tip at (4, 4), tail at about (11, 20) at
@@ -680,6 +730,22 @@ class Sprites:
                 "size": [len(dg_frames[0][0]), len(dg_frames[0])], "home": dg_home,
                 "frames": [{"ms": 100, "rows": eyes_rows(f, eyes[i], kind, "#", "@")}
                            for i, f in enumerate(dg_frames)]}, dg_pal)
+            self.anims[name].grip = (grip[0] + 1, grip[1])
+        # Whirled right round: his straight hang turned about his hands, in
+        # SPIN_STEPS steps, with the pivot where the hand-drawn frames hold on
+        straight = dg_frames[STRAIGHT]
+        pivot = (grip[0] + 1, grip[1])
+        reach = max(((x + 0.5 - pivot[0]) ** 2 + (y + 0.5 - pivot[1]) ** 2) ** 0.5
+                    for y, r in enumerate(straight) for x, ch in enumerate(r) if ch != ".")
+        size = 2 * (int(reach) + 2)
+        spin_home = [size // 2 - (pivot[0] - dg_home[0]), size // 2 - (pivot[1] - dg_home[1])]
+        for kind in ("happy", "surprised"):
+            rows = eyes_rows(straight, eyes[STRAIGHT], kind, "#", "@")
+            name = "spin_" + kind
+            self.anims[name] = Anim(name, {"size": [size, size], "home": spin_home, "frames": [
+                {"ms": 100, "rows": r} for r in turned_frames(rows, pivot, SPIN_STEPS, size)]}, dg_pal)
+            self.anims[name].grip = (size // 2, size // 2)
+            self.anims[name].heads = [None] * SPIN_STEPS        # no hats upside down
         # which way the lean frames swing him (+1: to the frame's right)
         lean = dg_frames[LEAN_2]
         cells = [x for r in lean for x, c in enumerate(r) if c != "."]
@@ -1482,6 +1548,7 @@ class ClawdPet(QWidget):
         self._skid = 0.0                       # sideways speed left over from a landing
         self._body_key = self._shape_key = None
         self._body_mask = None                 # his shape without flying particles (the catcher's)
+        self._tiny = QRegion(0, 0, 1, 1)
         self._catcher_src = None
         self._hat_cache = (None, None)
         self.counts = {"ticks": 0, "paints": 0, "shapes": 0, "moves": 0}   # for status: what costs
@@ -1897,7 +1964,7 @@ class ClawdPet(QWidget):
         if self.now < self._nudge_until:
             wait = min(wait, 75)
         for q in self.particles:
-            if q.get("flap") or q.get("g"):
+            if q.get("flap") or q.get("g") or q.get("orbit"):
                 return TICK_MS
             speed = max(abs(q["vx"]), abs(q["vy"]))          # cells/s: redraws needed per second
             wait = min(wait, 500 / speed if speed else 200)
@@ -1957,6 +2024,8 @@ class ClawdPet(QWidget):
                 c.hide()
             return
         body = self._body_mask                   # his body and props: particles can't take a drop
+        if self._dangling:                       # up on the pointer: out of the way of its clicks
+            body = self._tiny
         if body is not self._catcher_src:
             mask = body
             if self._drag_over and not c.mask().isEmpty():
@@ -2269,9 +2338,9 @@ class ClawdPet(QWidget):
     def pose(self, name):
         self.frame = ("pose", name, False)
 
-    def _emit(self, kind, x, y, vx=0.0, vy=0.0, life=3000.0, g=0.0, flap=None):
+    def _emit(self, kind, x, y, vx=0.0, vy=0.0, life=3000.0, g=0.0, flap=None, orbit=None):
         self.particles.append({"kind": kind, "x": x, "y": y, "y0": y, "age": 0.0,
-                               "life": life, "vx": vx, "vy": vy, "g": g, "flap": flap})
+                               "life": life, "vx": vx, "vy": vy, "g": g, "flap": flap, "orbit": orbit})
 
     def _bubble(self, on, kind="bubble"):
         """A speech bubble over his right shoulder ("!", coffee, water), moved
@@ -2290,6 +2359,10 @@ class ClawdPet(QWidget):
             elif q["kind"] in ("done_button", "done_button_pressed"):
                 flash = self.now < self._nudge_until and int(self.now // 150) % 2 == 0
                 q["kind"] = "done_button_pressed" if self._button_down or flash else "done_button"
+            elif q.get("orbit"):                               # circling his head (dizzy stars)
+                cx, cy, rx, ry, w, phase = q["orbit"]
+                a = phase + w * q["age"] / 1000
+                q["x"], q["y"] = cx + rx * math.cos(a), cy + ry * math.sin(a)
             elif q.get("flap"):                                # a bat: wings up, wings down, bobbing
                 q["kind"] = q["flap"][int(q["age"] // 130) % len(q["flap"])]
                 q["x"] += q["vx"] * dt / 1000
@@ -2462,15 +2535,21 @@ class ClawdPet(QWidget):
         # Flying particles go in as coarse blocks, so the shape (a round trip
         # to the X server and KWin) changes now and then, not every frame.
         blocks = self._particle_blocks()
-        if (body_key, blocks) != self._shape_key:
+        hole = None
+        if self._dangling:                       # whirled over the top he'd be over the pointer's
+            gx, gy = self._grip_in_window()      # tip: keep a hole there so clicks still go through
+            hole = (gx - self.grip_offset[0] - 3, gy - self.grip_offset[1] - 3, 7, 7)
+        if (body_key, blocks, hole) != self._shape_key:
             mask = self._body_mask
             for b in blocks:
                 mask = mask.united(QRect(*b))
+            if hole is not None:
+                mask = mask.subtracted(QRegion(*hole))
             if mask.isEmpty():
                 mask = QRegion(0, 0, 1, 1)           # an empty mask would mean "no mask"
             self.setMask(mask)
             self.counts["shapes"] += 1
-            self._mask, self._shape_key = mask, (body_key, blocks)
+            self._mask, self._shape_key = mask, (body_key, blocks, hole)
         self._shown = state
         self.update()
 
@@ -3174,12 +3253,14 @@ class ClawdPet(QWidget):
     # ── Hanging off the pointer ───────────────────────────────────
 
     def _grip_in_window(self, key=None):
-        """Where his hands are in the window, for a dangle frame: the line
-        between the frame's two middle columns, at the top of his hands."""
+        """Where his hands are in the window, for a dangle or spin frame: the
+        point he holds on by (between the frame's two middle columns, at the
+        top of his hands, which is also what a spin frame turns about)."""
         key = key or self.frame
+        a = self.sp.anims[key[1]]
         at = self._frame_pos(key)
-        gx, gy = self.sp.dangle_grip
-        return at.x() + (gx + 1) * self.scale, at.y() + gy * self.scale
+        gx, gy = a.grip
+        return at.x() + (a.w - gx if key[3] else gx) * self.scale, at.y() + gy * self.scale
 
     def _pointer_spot(self, key=None):
         """The window position that puts his hands on the pointer's tail."""
@@ -3276,6 +3357,8 @@ class ClawdPet(QWidget):
         length = 14 * s                             # grip to his middle
         end = self.now + random.uniform(*DANGLE_FOR)
         prev_x, vx, vy, prev_y = None, 0.0, 0.0, None
+        ax_f = ay_f = 0.0
+        turned, dizzy = 0.0, False
         flips, shake_dir = [], 0
         happy_until = self.now + 2500
         kick_at, kick_until = self.now + random.uniform(3000, 7000), 0.0
@@ -3288,14 +3371,26 @@ class ClawdPet(QWidget):
             dt = TICK_MS / 1000
             gx, gy = c[0] + self.grip_offset[0], c[1] + self.grip_offset[1]
             nvx = 0.0 if prev_x is None else (gx - prev_x) / dt
-            vy = 0.0 if prev_y is None else (gy - prev_y) / dt
+            nvy = 0.0 if prev_y is None else (gy - prev_y) / dt
             ax = max(-40_000.0, min(40_000.0, (nvx - vx) / dt))
-            vx, prev_x, prev_y = nvx, gx, gy
-            # a pendulum: gravity pulls him back under the pointer, its moves swing him
-            acc = (-(GRAVITY * s / length) * math.sin(self._swing) - (ax / length) * math.cos(self._swing)
-                   - 3.0 * self._swing_v)
-            self._swing_v += acc * dt
-            self._swing = max(-0.9, min(0.9, self._swing + self._swing_v * dt))
+            ay = max(-40_000.0, min(40_000.0, (nvy - vy) / dt))
+            ax_f, ay_f = (ax_f + ax) / 2, (ay_f + ay) / 2      # the pointer's jerks, smoothed a little
+            vx, vy, prev_x, prev_y = nvx, nvy, gx, gy
+            # A pendulum on a moving pivot: gravity pulls him back under the
+            # pointer, and its moves, up and down as well as sideways, swing
+            # him; whirl it round and he goes right over the top.
+            before = self._swing
+            for _ in range(4):
+                h = dt / 4
+                th = self._swing
+                acc = (-((GRAVITY * s - ay_f) * math.sin(th) + ax_f * math.cos(th)) / length
+                       - SWING_DAMP * self._swing_v)
+                self._swing_v = max(-30.0, min(30.0, self._swing_v + acc * h))
+                self._swing = th + self._swing_v * h
+            self._swing = (self._swing + math.pi) % (2 * math.pi) - math.pi
+            turned = turned * math.exp(-dt / 4) + abs((self._swing - before + math.pi) % (2 * math.pi) - math.pi)
+            if turned > 4 * math.pi:
+                dizzy = True                              # that was a good spin
             # shaken back and forth: he can't hold on
             if abs(nvx) > SHAKE_SPEED:
                 d = 1 if nvx > 0 else -1
@@ -3307,12 +3402,29 @@ class ClawdPet(QWidget):
                 vx += length * math.cos(self._swing) * self._swing_v      # flung off with his swing
                 vy -= length * math.sin(self._swing) * self._swing_v
                 break
+            spinning = abs(self._swing) > SPIN_FROM or abs(self._swing_v) > 3
             if tired_at is None and self.now >= end:
+                if spinning:                        # had enough mid-spin: off he flies
+                    vx += length * math.cos(self._swing) * self._swing_v
+                    vy -= length * math.sin(self._swing) * self._swing_v
+                    break
                 tired_at = self.now                 # had enough: one hand, then off
             if tired_at is not None and self.now - tired_at > 1400:
                 break
+            if dizzy and not spinning and abs(self._swing) < 0.3:
+                dizzy, turned = False, 0.0          # round and round: stars
+                for k in range(3):
+                    self._emit("spark", 0, 0, life=2600,
+                               orbit=(self.iw / 2 - 1, -1.5, 8.0, 2.0, 5.0, 2 * math.pi * k / 3))
+                face, face_until = "squeezed", self.now + 2600
             # what he looks like
             swing = abs(self._swing)
+            if swing > SPIN_FROM:                    # turned round: the rotated frames
+                k = round(self._swing / (2 * math.pi / SPIN_STEPS)) % SPIN_STEPS
+                self.show_frame("spin_surprised" if abs(self._swing_v) > 6 else "spin_happy", k)
+                self._place_on_pointer()
+                yield TICK_MS
+                continue
             if tired_at is not None:
                 idx, face = ONE_HAND, "squeezed"
             else:
@@ -3326,7 +3438,9 @@ class ClawdPet(QWidget):
                     idx = STRAIGHT
                     if self.now >= kick_at:
                         kick_until, kick_at = self.now + 1300, self.now + random.uniform(4000, 9000)
-                if swing > 0.5 or abs(ax) > 25_000:
+                if self.now < face_until and face == "squeezed":
+                    pass                                # still seeing stars
+                elif swing > 0.5 or abs(ax) > 25_000:
                     face, face_until = "surprised", self.now + 600
                 elif self.now < happy_until:
                     face = "happy"
