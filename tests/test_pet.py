@@ -3,8 +3,10 @@ Tests for the Clawd pet. Run from the project root:
 
     python -m unittest discover -s tests -v
 
-They use Qt's offscreen platform, so nothing appears on screen. Set
-CLAWD_SNAPSHOTS=/some/dir to also save a PNG of every animation's frames.
+They use Qt's offscreen platform with two screens laid out like the real
+desktop (tests/screens.json: a 1080p monitor on the right as primary, a
+taller laptop screen on the left, 330px lower), so nothing appears on screen.
+Set CLAWD_SNAPSHOTS=/some/dir to also save a PNG of every animation's frames.
 """
 
 import json
@@ -13,10 +15,11 @@ import random
 import sys
 import unittest
 
-os.environ["QT_QPA_PLATFORM"] = "offscreen"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.environ["QT_QPA_PLATFORM"] = "offscreen:configfile=" + os.path.join(ROOT, "tests", "screens.json")
 sys.path.insert(0, ROOT)
 
+from PyQt6.QtCore import QRect  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 APP = QApplication.instance() or QApplication([])
@@ -83,6 +86,16 @@ class Pet(unittest.TestCase):
         self.pet.timer.stop()
         self.pet.deleteLater()
 
+    def assert_standing(self, msg=""):
+        """Feet on the floor of the screen he's on, and all of him on some screen."""
+        self.assertAlmostEqual(self.pet.y, self.pet.ground_y(), delta=1, msg=msg)
+        left, right = self.pet.box_span()
+        top = self.pet.y + self.pet.home_px.y()
+        bottom = top + self.pet.ih * self.pet.scale
+        for x, y in ((left, top), (right - 1, top), (left, bottom - 1), (right - 1, bottom - 1)):
+            self.assertTrue(any(a.contains(int(x), int(y)) for a in cp.screen_areas()),
+                            f"{msg}: corner {x:.0f},{y:.0f} is off every screen")
+
     def run_until_idle(self, limit_ms=180_000):
         t = 0
         while self.pet.action != "idle" and t < limit_ms:
@@ -105,21 +118,18 @@ class Pet(unittest.TestCase):
                 self.assertEqual(self.pet.action, action)
                 took = self.run_until_idle()
                 self.assertEqual(self.pet.action, "idle", f"{action} still running after {took} ms")
-                self.assertAlmostEqual(self.pet.y, self.pet.ground_y(), delta=1)
-                left, right = self.pet.box_span()
-                self.assertGreaterEqual(left, self.geo.left() - 1, action)
-                self.assertLessEqual(right, self.geo.left() + self.geo.width() + 1, action)
+                self.assert_standing(action)
 
     def test_idle_eventually_picks_actions_and_stays_on_screen(self):
-        seen = set()
-        for _ in range(int(20 * 60_000 / 16)):          # twenty simulated minutes
+        seen, screens = set(), set()
+        for _ in range(int(30 * 60_000 / 16)):          # thirty simulated minutes
             self.pet.advance(16)
             seen.add(self.pet.action)
-            if self.pet.action in ("idle",):
-                left, right = self.pet.box_span()
-                self.assertGreaterEqual(left, self.geo.left() - 1)
-                self.assertLessEqual(right, self.geo.left() + self.geo.width() + 1)
+            if self.pet.action == "idle" and self.pet.wait > 100:
+                self.assert_standing("idle")
+                screens.add(self.pet.screen_geometry().left())
         self.assertGreaterEqual(len(seen - {"idle"}), 4, f"only saw {seen}")
+        self.assertEqual(len(screens), 2, "he never visited the other screen")
 
     def test_dropping_him_lands_on_the_ground(self):
         self.pet.y = self.pet.ground_y() - 300
@@ -128,7 +138,7 @@ class Pet(unittest.TestCase):
         self.assertEqual(self.pet.action, "fall")
         self.run_until_idle()
         self.assertEqual(self.pet.action, "idle")
-        self.assertAlmostEqual(self.pet.y, self.pet.ground_y(), delta=1)
+        self.assert_standing("after the drop")
 
     def test_changing_size_keeps_his_feet_in_place(self):
         before_left, _ = self.pet.box_span()
@@ -155,6 +165,109 @@ class Pet(unittest.TestCase):
                     for _ in range(8):
                         self.pet.advance(16)
                     self.pet.canvas.save(os.path.join(out, f"{action}_{n:02d}.png"))
+
+
+class BetweenScreens(unittest.TestCase):
+    HDMI = QRect(1920, 0, 1920, 1080)
+    LAPTOP = QRect(0, 330, 1920, 1200)
+
+    def setUp(self):
+        random.seed(3)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def stand(self, box_left):
+        self.pet.set_box_left(box_left)
+        self.pet.y = self.pet.ground_y()
+        self.pet.start("idle")
+
+    def play(self, action=None, limit_ms=60_000, **kw):
+        if action:
+            self.pet.start(action, **kw)
+        t = 0
+        while self.pet.action != "idle" and t < limit_ms:
+            self.pet.advance(16)
+            t += 16
+        self.assertEqual(self.pet.action, "idle", f"still {self.pet.action}")
+
+    def feet(self):
+        return self.pet.y + self.pet.home_px.y() + self.pet.ih * self.pet.scale
+
+    def test_x11_single_work_area_does_not_cut_the_taller_screen(self):
+        # X11 publishes one work area for the whole desktop: a 38px taskbar
+        # at the bottom of the HDMI screen "cuts" the laptop screen at y=1042.
+        self.assertEqual(cp.usable_area(self.LAPTOP, QRect(0, 330, 1920, 712)), self.LAPTOP)
+        self.assertEqual(cp.usable_area(self.HDMI, QRect(1920, 0, 1920, 1042)),
+                         QRect(1920, 0, 1920, 1042))
+
+    def test_walks_off_the_high_screen_and_drops_onto_the_laptop(self):
+        self.stand(1960)
+        self.assertEqual(self.feet(), 1080)
+        self.play("walk", target=1500)
+        self.assertEqual(self.pet.screen_geometry(), self.LAPTOP)
+        self.assertAlmostEqual(self.feet(), 1530, delta=1)
+
+    def test_the_laptop_side_of_the_seam_is_a_wall(self):
+        self.stand(1700)
+        self.pet.vx = 300                 # shove him right, below the HDMI screen's floor
+        for _ in range(200):
+            self.pet.advance(16)
+        self.assertLessEqual(self.pet.box_span()[1], 1920)
+        self.assertEqual(self.pet.vx, 0)
+        self.assertAlmostEqual(self.feet(), 1530, delta=1)
+
+    def test_walking_to_the_high_screen_leaps_the_wall(self):
+        self.stand(1700)
+        self.play("walk", target=2300)
+        self.assertEqual(self.pet.screen_geometry(), self.HDMI)
+        self.assertAlmostEqual(self.feet(), 1080, delta=1)
+
+    def test_leaps_back_up_onto_the_high_screen(self):
+        self.stand(1650)
+        self.play("leap")
+        self.assertEqual(self.pet.screen_geometry(), self.HDMI)
+        self.assertAlmostEqual(self.feet(), 1080, delta=1)
+        self.assertGreater(self.pet.box_span()[0], 1920)
+
+    def test_leap_clears_the_corner(self):
+        self.stand(1650)
+        self.pet.start("leap")
+        straddled = 0
+        for _ in range(4000):
+            self.pet.advance(16)
+            left, right = self.pet.box_span()
+            if left < 1920 < right:       # straddling the seam: must be above the HDMI floor
+                straddled += 1
+                self.assertLessEqual(self.feet(), 1080 + 1)
+            if self.pet.action == "idle":
+                break
+        self.assertGreater(straddled, 0, "never crossed the seam")
+
+    def test_dropped_under_the_short_screen_ends_up_on_a_floor(self):
+        self.pet.set_box_left(2500)
+        self.pet.y = 1300                # below the HDMI screen: on no screen at all
+        self.pet.drop()
+        self.play()
+        self.assertEqual(self.pet.screen_geometry(), self.HDMI)
+        self.assertAlmostEqual(self.feet(), 1080, delta=1)
+
+    def test_thrown_across_the_seam_lands_on_the_laptop(self):
+        self.stand(2000)
+        self.pet.y -= 400
+        self.pet.drop(vx=-1500, vy=-200)
+        self.play()
+        self.assertEqual(self.pet.screen_geometry(), self.LAPTOP)
+        self.assertAlmostEqual(self.feet(), 1530, delta=1)
+
+    def test_he_picks_the_leap_when_stuck_below_the_high_screen(self):
+        self.stand(1780)
+        picks = [self.pet._pick_action() for _ in range(300)]
+        self.assertIn("leap", picks)
+        self.stand(3000)
+        self.assertNotIn("leap", [self.pet._pick_action() for _ in range(300)])
 
 
 class Launcher(unittest.TestCase):

@@ -27,9 +27,21 @@ sprites/clawd.json   (committed; the only thing the app reads)
   when something visible changed. A 16 ms QTimer drives it; tests call it directly
 - Loops (walking, typing, driving, riding) repeat the traced `loop` segment as long
   as the behaviour wants, then play `outro`
-- Physics: walks and rides clamp to the current screen's available area; dropped
-  or thrown he falls with gravity, bounces off the sides, lands with the official
-  Jumping squash
+- Physics: dropped or thrown he falls with gravity, bounces off walls, lands with
+  the official Jumping squash
+
+## Multiple monitors
+- Each screen's floor is the bottom of its *usable* area. X11 (so XWayland) has one
+  work area for the whole desktop, so a taskbar at the bottom of a short monitor
+  "cuts" a taller one hundreds of pixels up. `usable_area()` ignores cuts deeper
+  than 15% of a screen (real panels are thin); `x11_work_area()` reads
+  `_NET_WORKAREA` itself because Qt only applies it at some point after startup
+- Moving sideways past a screen edge is allowed when another screen continues at
+  his body's height; if the floor there is lower he falls to it. Otherwise it's a wall
+- `_act_leap` gets him back up onto a higher neighbouring screen: a real ballistic
+  arc that only drifts sideways once his feet clear the higher floor
+- Walks are sometimes long trips to a random spot on any screen; rides stay on one
+  screen; he only lurks at outer edges, never at the seam between two screens
 
 ## Platform notes
 - Wayland: forced onto XWayland (`QT_QPA_PLATFORM=xcb`) so `move()` works;

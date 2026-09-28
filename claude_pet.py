@@ -15,8 +15,10 @@ import json
 import os
 import random
 import shutil
+import signal
 import subprocess
 import sys
+import time
 import webbrowser
 
 # A desktop pet is a window that moves itself, which Wayland doesn't allow,
@@ -221,6 +223,74 @@ def open_claude_web():
         webbrowser.open("https://claude.ai")
 
 
+# ── Screens ─────────────────────────────────────────────────────────
+
+PANEL_MAX = 0.15       # a real panel never takes more than this share of a screen
+
+
+def usable_area(geo, avail):
+    """The part of a screen he can use, from its geometry and Qt's available area.
+
+    X11 (so XWayland too) publishes ONE work area for the whole desktop, so a
+    taskbar at the bottom of a short monitor also "cuts" a taller monitor next
+    to it, hundreds of pixels above its real bottom. Real panels are thin: a
+    cut deeper than PANEL_MAX of the screen is that artefact, and is ignored.
+    """
+    cuts = [avail.left() - geo.left(), avail.top() - geo.top(),
+            geo.left() + geo.width() - avail.left() - avail.width(),
+            geo.top() + geo.height() - avail.top() - avail.height()]
+    limits = [geo.width() * PANEL_MAX, geo.height() * PANEL_MAX] * 2
+    left, top, right, bottom = [c if 0 <= c <= m else 0 for c, m in zip(cuts, limits)]
+    return QRect(geo.left() + left, geo.top() + top,
+                 geo.width() - left - right, geo.height() - top - bottom)
+
+
+_work_area = {"checked": -1e9, "rect": None}
+
+
+def x11_work_area():
+    """The single, desktop-wide work area X11 publishes, or None off X11.
+
+    Qt applies it too, but only once it notices the property, some time after
+    startup; reading it ourselves (every 10 s at most) keeps the floors steady.
+    """
+    if QApplication.platformName() != "xcb" or not shutil.which("xprop"):
+        return None
+    now = time.monotonic()
+    if now - _work_area["checked"] > 10:
+        _work_area["checked"] = now
+        try:
+            out = subprocess.run(["xprop", "-root", "_NET_WORKAREA"], capture_output=True,
+                                 text=True, timeout=2).stdout
+            _work_area["rect"] = QRect(*[int(v) for v in out.split("=")[1].split(",")[:4]])
+        except (OSError, IndexError, ValueError, subprocess.SubprocessError):
+            _work_area["rect"] = None
+    return _work_area["rect"]
+
+
+def screen_areas():
+    work = x11_work_area()
+    areas = []
+    for sc in QApplication.screens():
+        geo = sc.geometry()
+        avail = geo.intersected(work) if work is not None else sc.availableGeometry()
+        areas.append(usable_area(geo, avail))
+    return areas
+
+
+def area_at(x, y, areas=None):
+    for a in screen_areas() if areas is None else areas:
+        if a.left() <= x < a.left() + a.width() and a.top() <= y < a.top() + a.height():
+            return a
+    return None
+
+
+def _distance(r, x, y):
+    dx = max(r.left() - x, 0, x - r.left() - r.width())
+    dy = max(r.top() - y, 0, y - r.top() - r.height())
+    return (dx * dx + dy * dy) ** 0.5
+
+
 # ── The pet ─────────────────────────────────────────────────────────
 
 class ClawdPet(QWidget):
@@ -255,13 +325,13 @@ class ClawdPet(QWidget):
         self.airborne = False
         self.dragging = False
         self.offscreen = False         # lurking: allowed past the screen edge
+        self.scripted = False          # leaping: the behaviour moves him, not physics
         self.pad = (0, 0)              # how far the current prop sticks out, in pixels
         self.particles = []            # sleeping Z's: [x, y, age_ms, glyph]
         self.frame = ("pose", "idle", False)
         self.action = None
         self.script = None
         self.wait = 0.0
-        self._geo = None
         self._press = None
         self._trail = []
         self._shown = None
@@ -269,6 +339,8 @@ class ClawdPet(QWidget):
 
         self._place_initially()
         self.start("idle")
+        QApplication.instance().screenRemoved.connect(
+            lambda _screen: QTimer.singleShot(300, self._rescue))
 
         self.clock = QElapsedTimer()
         self.clock.start()
@@ -299,14 +371,24 @@ class ClawdPet(QWidget):
         return QRect(self.home_px.x() - left * s, self.home_px.y() - hy * s, anim.w * s, anim.h * s)
 
     def screen_geometry(self):
+        """Usable area of the screen he's in (the nearest one if he's in none)."""
         left, right = self.box_span()
-        mid = QPoint(int((left + right) / 2), int(self.y + self.home_px.y() + self.ih * self.scale / 2))
-        screen = QApplication.screenAt(mid)
-        if screen is not None:
-            self._geo = screen.availableGeometry()
-        elif self._geo is None:
-            self._geo = (self.screen() or QApplication.primaryScreen()).availableGeometry()
-        return self._geo
+        cx, cy = (left + right) / 2, self._mid()
+        areas = screen_areas()
+        here = area_at(cx, cy, areas)
+        if here is not None:
+            return here
+        # In a gap, e.g. dropped below a shorter monitor: prefer the screen
+        # straight above or below him, else whichever is nearest.
+        column = [a for a in areas if a.left() <= cx < a.left() + a.width()]
+        return min(column or areas, key=lambda a: _distance(a, cx, cy))
+
+    def _mid(self):
+        """Height of the middle of his body, on screen."""
+        return self.y + self.home_px.y() + self.ih * self.scale / 2
+
+    def _feet(self):
+        return self.y + self.home_px.y() + self.ih * self.scale
 
     def box_span(self):
         """Left and right edges of the idle pose, on screen."""
@@ -335,9 +417,38 @@ class ClawdPet(QWidget):
         return max(0, left) * self.scale, max(0, a.w - left - self.iw) * self.scale
 
     def _room(self):
+        """Space left and right of him on this screen."""
         geo = self.screen_geometry()
         left, right = self.box_span()
         return left - geo.left(), geo.left() + geo.width() - right
+
+    def _reach(self):
+        """Like _room, but a neighbouring screen that carries on at his height
+        (so he can walk over and drop in) counts as more room."""
+        geo = self.screen_geometry()
+        room_l, room_r = self._room()
+        if area_at(geo.left() - 1, self._mid()) is not None:
+            room_l += 300
+        if area_at(geo.left() + geo.width(), self._mid()) is not None:
+            room_r += 300
+        return room_l, room_r
+
+    def _leap_target(self):
+        """(side, area) when he's near a seam and the next screen's floor is
+        higher than his, so walking there would hit a wall."""
+        geo = self.screen_geometry()
+        room_l, room_r = self._room()
+        feet = self._feet()
+        for side, room in ((-1, room_l), (1, room_r)):
+            if room > 300:
+                continue
+            x = geo.left() - 1 if side < 0 else geo.left() + geo.width()
+            for a in screen_areas():
+                floor = a.top() + a.height()
+                if (a != geo and a.left() <= x < a.left() + a.width()
+                        and geo.top() + self.ih * self.scale < floor < feet - 8):
+                    return side, a
+        return None
 
     def _place_initially(self):
         screen, left = QApplication.primaryScreen(), None
@@ -348,14 +459,20 @@ class ClawdPet(QWidget):
                     screen = sc
             if self.settings.value("left") is not None:
                 left = float(self.settings.value("left"))
-        geo = screen.availableGeometry()
-        self._geo = geo
+        geo = usable_area(screen.geometry(), screen.availableGeometry())
         width = self.iw * self.scale
         if left is None or not geo.left() <= left <= geo.left() + geo.width() - width:
             left = geo.left() + geo.width() - width - 60
         self.set_box_left(left)
         self.y = self.ground_y()
         self.move(int(self.x), int(self.y))
+
+    def _rescue(self):
+        """After a monitor is unplugged, bring him back if he was on it."""
+        left, right = self.box_span()
+        if area_at((left + right) / 2, self._mid()) is None:
+            self._place_initially()
+            self.start("idle")
 
     def set_scale(self, scale):
         left, _ = self.box_span()
@@ -386,6 +503,7 @@ class ClawdPet(QWidget):
         self.vx = 0.0 if not self.airborne else self.vx
         self.pad = (0, 0)
         self.offscreen = False
+        self.scripted = False
         if action != "sleep":
             self.particles.clear()
         self.action = action
@@ -402,6 +520,8 @@ class ClawdPet(QWidget):
         weights = dict(WEIGHTS)
         if self._lurk_side() is None:
             weights["lurk"] = 0
+        if self._leap_target() is not None:
+            weights["leap"] = 25         # otherwise he'd pile up on the lower screen
         return random.choices(list(weights), weights=list(weights.values()))[0]
 
     def _lurk_side(self):
@@ -412,15 +532,14 @@ class ClawdPet(QWidget):
         if min(room_l, room_r) > 250:
             return None
         edge = geo.left() - 5 if side < 0 else geo.left() + geo.width() + 5
-        beyond = QApplication.screenAt(QPoint(edge, int(self.y + self.height() / 2)))
-        return side if beyond is None else None
+        return side if area_at(edge, self._mid()) is None else None
 
     def _on_timer(self):
         self.advance(min(self.clock.restart(), 100))
 
     def advance(self, dt):
         """Move the simulation on by dt milliseconds."""
-        if not self.dragging:
+        if not (self.dragging or self.scripted):
             self._physics(dt)
         self.wait -= dt
         for _ in range(100):                     # a script can take several steps at once
@@ -438,30 +557,43 @@ class ClawdPet(QWidget):
     def _physics(self, dt):
         sec = dt / 1000
         s = self.scale
-        lo, hi = self._limits()
         if self.airborne:
             self.vy = min(self.vy + GRAVITY * s * sec, 250 * s)
-            self.x += self.vx * sec
+            self._slide(self.vx * sec, bounce=True)
             self.y += self.vy * sec
-            if self.x < lo:
-                self.x, self.vx = lo, abs(self.vx) * 0.4
-            elif self.x > hi:
-                self.x, self.vx = hi, -abs(self.vx) * 0.4
-            geo = self.screen_geometry()
-            ceiling = geo.top() - self.home_px.y()
+            ceiling = self.screen_geometry().top() - self.home_px.y()
             if self.y < ceiling:
                 self.y, self.vy = ceiling, abs(self.vy) * 0.3
             if self.y >= self.ground_y():
                 self.y = self.ground_y()
                 self.airborne = False
                 self.vx = self.vy = 0.0
-        elif self.vx:
-            self.x += self.vx * sec
-            if not self.offscreen:
-                if self.x < lo:
-                    self.x, self.vx = lo, 0.0
-                elif self.x > hi:
-                    self.x, self.vx = hi, 0.0
+            return
+        if self.vx:
+            self._slide(self.vx * sec)
+        if not self.offscreen:
+            ground = self.ground_y()
+            if self.y < ground - 1:
+                self.drop(self.vx * 0.6)         # walked off the edge of a higher screen
+            elif self.y > ground:
+                self.y = ground                  # screens changed under him
+
+    def _slide(self, dx, bounce=False):
+        """Move sideways. Past this screen's edge is fine if another screen
+        carries on at his height; otherwise it's a wall (or a bounce)."""
+        self.x += dx
+        if self.offscreen or not dx:
+            return
+        lo, hi = self._limits()
+        left, right = self.box_span()
+        if dx > 0 and self.x > hi:
+            if self.pad != (0, 0) or area_at(right - 1, self._mid()) is None:
+                self.x = hi
+                self.vx = -abs(self.vx) * 0.4 if bounce else 0.0
+        elif dx < 0 and self.x < lo:
+            if self.pad != (0, 0) or area_at(left, self._mid()) is None:
+                self.x = lo
+                self.vx = abs(self.vx) * 0.4 if bounce else 0.0
 
     # ── What to show ──────────────────────────────────────────────
 
@@ -616,13 +748,75 @@ class ClawdPet(QWidget):
         if self.offscreen:
             self.set_box_left(target)
 
-    def _act_walk(self):
-        room_l, room_r = self._room()
-        direction = 1 if random.uniform(0, room_l + room_r) < room_r else -1
-        room = room_r if direction > 0 else room_l
-        dist = min(room, random.uniform(60, 420))
-        if dist >= 8:
-            yield from self._walk_to(self.box_span()[0] + direction * dist)
+    def _act_walk(self, target=None):
+        if target is None:
+            if random.random() < 0.25 and len(screen_areas()) > 1:
+                # a trip: anywhere on the desktop, across screens if need be
+                a = random.choice(screen_areas())
+                target = a.left() + random.uniform(0, a.width() - self.iw * self.scale)
+            else:
+                room_l, room_r = self._reach()
+                direction = 1 if random.uniform(0, room_l + room_r) < room_r else -1
+                room = room_r if direction > 0 else room_l
+                dist = min(room, random.uniform(60, 420))
+                if dist < 8:
+                    return
+                target = self.box_span()[0] + direction * dist
+        for _ in range(4):                 # a few seams at most
+            yield from self._walk_to(target)
+            left = self.box_span()[0]
+            if abs(left - target) < 4:
+                return
+            # Stopped short: a wall. Leap if a higher screen is what's in the way.
+            leap = self._leap_target()
+            if leap is None or leap[0] != (1 if target > left else -1):
+                return
+            yield from self._act_leap()
+
+    def _act_leap(self):
+        """Jump up onto the higher screen next to this one."""
+        target = self._leap_target()
+        if target is None:
+            return
+        side, area = target
+        s = self.scale
+        width = self.iw * s
+        geo = self.screen_geometry()
+        seam = geo.left() if side < 0 else geo.left() + geo.width()
+        # run up to just short of the seam
+        yield from self._walk_to(seam + 3 * s if side < 0 else seam - width - 3 * s)
+        self.pose("idle")
+        yield 200
+        land = random.uniform(10, 40) * s
+        x0, y0 = self.x, self.y
+        x1 = (seam + land if side > 0 else seam - width - land) - self.home_px.x()
+        y1 = area.top() + area.height() - self.home_px.y() - self.ih * s
+        # A real ballistic arc under GRAVITY, peaking a little above the new floor.
+        g = GRAVITY * s
+        apex = min(y0, y1) - 10 * s
+        t_up = (2 * (y0 - apex) / g) ** 0.5
+        t_down = (2 * (y1 - apex) / g) ** 0.5
+        total = t_up + t_down
+        # No sideways drift until his feet are above the floor he's aiming
+        # for, so he never clips the corner where the screens meet.
+        t_clear = t_up - t_down if y1 < y0 else 0.0
+        self.show_frame("jump", 1)           # crouch
+        yield 120
+        self.show_frame("jump", 2)           # arms up
+        self.scripted = True
+        t = 0.0
+        while t < total:
+            yield TICK_MS
+            t = min(total, t + TICK_MS / 1000)
+            if t < t_up:
+                self.y = apex + 0.5 * g * (t_up - t) ** 2
+            else:
+                self.y = apex + 0.5 * g * (t - t_up) ** 2
+            u = 0.0 if t <= t_clear else (t - t_clear) / (total - t_clear)
+            self.x = x0 + (x1 - x0) * u * u * (3 - 2 * u)
+        self.x, self.y = x1, y1
+        self.scripted = False
+        yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
 
     def _ride(self, name, speed):
         room_l, room_r = self._room()
@@ -853,6 +1047,9 @@ def main():
         pet.tray = tray
 
     app.aboutToQuit.connect(pet.save)
+    # quit cleanly (and remember where he was) on Ctrl+C or kill
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    signal.signal(signal.SIGTERM, lambda *_: app.quit())
     sys.exit(app.exec())
 
 

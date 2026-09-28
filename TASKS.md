@@ -8,11 +8,12 @@
 - [x] Left-click opens Claude Code in a terminal on Linux, macOS and Windows
 - [x] Drag and throw with gravity; clicks pass through the space around him
 - [x] Walks and rides along the bottom of the screen; sizes Small to Huge (remembered)
+- [x] Roams across monitors: walks off a taller screen and drops, leaps back up,
+      throws and drops land on the right floor (tests use the real two-screen layout)
 - [x] Tests (`python -m unittest discover -s tests -v`)
 
 ## Possible Improvements
 - [ ] React to Claude Code activity via hooks (typing while it edits, sleeping when idle)
 - [ ] Startup on login (a .desktop file in ~/.config/autostart)
 - [ ] Trace the /btw video's poses (profile turn, thought bubble)
-- [ ] Walk across monitors instead of staying on one
 - [ ] Windows installer

@@ -18,6 +18,7 @@ environment back.
 - **Right-click**: menu (Claude Code, claude.ai, play any animation, size, quit)
 - **Drag**: pick him up; let go and he falls to the bottom of the screen (throw him and he bounces)
 - Tray icon: click to hide/show
+- He roams between monitors: walks off a taller screen and drops down, leaps back up
 
 ## Layout
 - `claude_pet.py`: the app (sprite loading, behaviours, physics, launcher)

@@ -12,6 +12,9 @@
 - **assets/ is git-ignored**: it holds Anthropic's files and personal screen recordings.
   `tools/fetch_official.py` re-downloads the official set
 - **Window shaped to the sprite**: otherwise the transparent area around him blocks clicks
+- **Per-screen floors, not Qt's availableGeometry** (multi-monitor): X11's single
+  work area put his floor on the laptop screen at the HDMI taskbar's height,
+  488px up. Cuts deeper than 15% of a screen are ignored (see ARCHITECTURE.md)
 - **Faces derived from the idle pose** (blink, look, happy), copying official shapes:
   the Clawd-Laptop wink for blinks, the Clawd-Dancing ^ ^ for happy
 
