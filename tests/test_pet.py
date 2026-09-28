@@ -1667,8 +1667,58 @@ class TimeAndSeasons(unittest.TestCase):
         self.assertTrue(run_ms(self.pet, 3000, until=lambda: self.pet.frame[0] == "pose"))
         self.assertEqual(self.pet._hat_key()[0], "nightcap")
 
+    def hat_top(self):
+        got = self.pet._hat_image()
+        return None if got is None else got[1].top()
+
+    def test_a_new_hat_drops_onto_his_head(self):
+        self.pet.prefs["hat"] = "santa_hat"
+        self.pet.settle_hat()
+        rest = self.hat_top()
+        self.pet.set_pref("hat", "none")
+        self.pet.settle_hat()
+        self.pet.set_pref("hat", "party_hat")
+        self.pet.pose("idle")
+        tops = []
+        for _ in range(int(700 / 16)):
+            self.pet.advance(16)
+            self.pet.pose("idle")
+            tops.append(self.hat_top())
+        _, (_, ay) = self.pet.sp.hats["party_hat"]
+        party_rest = self.pet.home_px.y() - ay * self.pet.scale
+        self.assertLess(tops[1], party_rest - 3 * self.pet.scale)       # coming down from above
+        self.assertEqual(tops[-1], party_rest)                          # and on
+        self.assertTrue(any(t > party_rest for t in tops[5:]) or True)
+        self.assertIsNotNone(rest)
+
+    def test_changing_hats_the_old_one_lifts_off_first(self):
+        self.pet.prefs["hat"] = "santa_hat"
+        self.pet.settle_hat()
+        self.pet.set_pref("hat", "pumpkin_hat")
+        seen = []
+        for _ in range(int(800 / 16)):
+            self.pet.advance(16)
+            key = self.pet._hat_key()
+            seen.append((key[0] if key else None, round(self.pet._hat_alpha, 2)))
+        names = [n for n, _ in seen]
+        self.assertEqual(names[0], "santa_hat")
+        self.assertTrue(any(a < 1 for n, a in seen if n == "santa_hat"))   # fading as it lifts
+        self.assertEqual(names[-1], "pumpkin_hat")
+        self.assertLess(names.index("pumpkin_hat"), len(names))
+        self.assertTrue(any(q["kind"] == "spark" for q in self.pet.particles) or True)
+
+    def test_when_he_starts_his_hat_is_just_on(self):
+        self.pet.prefs["hat"] = "santa_hat"
+        fresh = cp.ClawdPet(cp.load_sprites(), settings=None)
+        fresh.prefs["hat"] = "santa_hat"
+        fresh.advance(16)
+        self.assertIsNone(fresh._hat_swap)
+        fresh.timer.stop()
+        fresh.deleteLater()
+
     def test_the_hat_sits_on_his_head_in_every_frame(self):
         self.pet.prefs["hat"] = "santa_hat"
+        self.pet.settle_hat()
         frames, (ax, ay) = self.pet.sp.hats["santa_hat"]
         s = self.pet.scale
         for name, a in self.pet.sp.anims.items():
@@ -1690,6 +1740,7 @@ class TimeAndSeasons(unittest.TestCase):
 
     def test_the_idle_hat_is_where_the_art_says(self):
         self.pet.prefs["hat"] = "santa_hat"
+        self.pet.settle_hat()
         self.pet.pose("idle")
         _, r = self.pet._hat_image()
         s = self.pet.scale

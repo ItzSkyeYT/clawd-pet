@@ -108,6 +108,7 @@ ON_A_WINDOW = ["walk", "wave", "jump", "jump_happy", "dance", "laptop", "sparkle
 LIVELY = ("dance", "race", "sparkler", "jump", "jump_happy", "cloud")   # calmer at night
 BOUNCY = {"walk", "dance", "jump", "jump_happy", "celebrate", "race", "wave"}   # a hat's pom-pom swings
 PARTIES = ("celebrate", "new_year", "birthday")   # celebrations: the party hat, confetti
+HAT_SWAP = (220, 340)         # ms: a changed hat's old one lifts off, then the new one drops on
 AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["perch_window", "hop_down", "climb_window", "climb_down", "window_jump",
                                         "visit", "read"]
 CLAUDE_PREVIEWS = ["work", "attention", "celebrate"]
@@ -1583,6 +1584,9 @@ class ClawdPet(QWidget):
         self.prefs = Prefs(settings)
         self.wall = wall_clock                 # the date and time (tests set their own)
         self._hat_on = False                   # is a hat drawn on this frame
+        self._hat_now = "unset"                # the hat that's on his head (not mid-change)
+        self._hat_swap = None                  # (old, new, since, sparkled) while it changes
+        self._hat_lift, self._hat_alpha = 0.0, 1.0
         self.grip_offset = cursor_grip()       # where on the pointer he holds on
         self._dangling = False
         self._release = False                  # let go of the pointer (asked from outside)
@@ -2092,7 +2096,7 @@ class ClawdPet(QWidget):
         """Every frame while he moves; otherwise only when something on screen
         is due to change (his next step, a particle crossing a cell), and at
         least every IDLE_TICK: standing still costs next to nothing."""
-        if self.airborne or self.dragging or self._dangling or self.vx or self._skid:
+        if self.airborne or self.dragging or self._dangling or self.vx or self._skid or self._hat_swap:
             return TICK_MS
         wait = max(TICK_MS, min(self.wait, IDLE_TICK))
         if self.now < self._nudge_until:
@@ -2611,10 +2615,46 @@ class ClawdPet(QWidget):
         self._hat_cache = (now, key)
         return key
 
+    def settle_hat(self):
+        """The right hat straight on, no animation."""
+        self._hat_now, self._hat_swap = self.hat(), None
+        self._hat_cache = (None, None)
+
     def _work_out_hat(self):
-        name = self.hat()
-        if name is None:
-            return None
+        """The hat as drawn now. A change of hat is animated: the old one lifts
+        off and fades, then the new one drops onto his head, bounces, and
+        sparkles. When he starts, it's just on."""
+        want = self.hat()
+        if self._hat_now == "unset":
+            self._hat_now = want
+        if self._hat_swap is None and want != self._hat_now:
+            skip = 0 if self._hat_now else HAT_SWAP[0]      # nothing to take off first
+            self._hat_swap = (self._hat_now, want, self.now - skip, False)
+        self._hat_lift, self._hat_alpha = 0.0, 1.0
+        name = self._hat_now
+        if self._hat_swap is not None:
+            old, new, since, sparkled = self._hat_swap
+            t = self.now - since
+            if t < HAT_SWAP[0]:                              # off it comes
+                u = t / HAT_SWAP[0]
+                name, self._hat_lift, self._hat_alpha = old, 6 * u, 1 - u
+            elif new is not None and t < sum(HAT_SWAP):      # on goes the new one
+                u = (t - HAT_SWAP[0]) / HAT_SWAP[1]
+                if u < 0.7:
+                    self._hat_lift = 9 * (1 - u / 0.7) ** 2
+                else:
+                    self._hat_lift = 1.2 * math.sin((u - 0.7) / 0.3 * math.pi)
+                    if not sparkled:
+                        self._hat_swap = (old, new, since, True)
+                        for k in range(3):
+                            self._emit("spark", self.iw / 2 - 6 + 5 * k, -3.0, vy=-5, life=500)
+                name, self._hat_alpha = new, min(1.0, u * 2.5)
+            else:
+                self._hat_now, self._hat_swap = new, None
+                name = new
+        return None if name is None else self._hat_frame(name)
+
+    def _hat_frame(self, name):
         if name == "nightcap" and self.frame[:2] == ("anim", "stretch"):
             name = "nightcap_stretch"
         n = len(self.sp.hats[name][0])
@@ -2663,7 +2703,8 @@ class ClawdPet(QWidget):
             x, img = w - x - img.width(), self.sp.hats_flipped[key[0]][key[1]]
         s = self.scale
         at = self._frame_pos(kind)
-        return img, QRect(at.x() + x * s, at.y() + (top - ay) * s, img.width() * s, img.height() * s)
+        lift = int(round(self._hat_lift * s))
+        return img, QRect(at.x() + x * s, at.y() + (top - ay) * s - lift, img.width() * s, img.height() * s)
 
     def _glyph_rect(self, q):
         s = self.scale
@@ -2675,7 +2716,7 @@ class ClawdPet(QWidget):
         """Repaint (and re-shape the window) only when something visible changed."""
         extras = self._extras()
         rects = tuple((r.x(), r.y(), r.width(), r.height()) for _, r in extras)
-        state = (self.frame, self.lift, self._hat_key(), rects,
+        state = (self.frame, self.lift, self._hat_key(), round(self._hat_alpha * 8), rects,
                  tuple((q["kind"], int(q["x"]), int(q["y"]), self._fade(q)) for q in self.particles))
         if state == self._shown:
             return
@@ -2740,8 +2781,13 @@ class ClawdPet(QWidget):
         p.drawPixmap(at, pm)
         extras = self._extras()
         for k, (img, r) in enumerate(extras):
+            hat = k == 0 and self._hat_on
+            if hat:
+                p.setOpacity(self._hat_alpha)            # fading in or out as it changes
             p.drawImage(r, img)
-            if k == 0 and self._hat_on:
+            if hat:
+                p.setOpacity(1.0)
+            if hat:
                 # arms raised past his head come up in front of the hat's brim
                 p.save()
                 p.setClipRegion(self._reaching_up())
