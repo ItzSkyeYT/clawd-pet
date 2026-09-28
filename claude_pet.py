@@ -66,6 +66,8 @@ SKID = 6.0                    # 1/s: how quickly a sideways landing skids to a s
 AIR_DRAG = 0.35               # 1/s: the air slowing him sideways
 CHUTE_FALL = 32               # cells/s: how fast he comes down under a parachute or umbrella
 CHUTE_SWAY = (2.5, 0.9)       # cells, Hz: swaying from side to side on the way down
+FLOAT_FROM = 30               # cells: from a drop this high he floats down (umbrella, parachute)...
+SKYDIVE_FROM = 70             # ...and from this high he may skydive a bit before the parachute
 THROW_WINDOW = 100            # ms: a throw goes as fast as the drag moved in its last moments
 MASK_BLOCK = 4                # cells: moving particles shape the window in blocks this big
 PIXMAP_CACHE = 120            # scaled frames kept ready (the ones used most recently)
@@ -308,6 +310,12 @@ NEVER_GRAB = REMINDERS + ("settings", "grab", "duck", "attention", "held", "fall
 REMINDER_BITS = {"water_bubble", "break_bubble", "done_button", "done_button_pressed"}
 BUBBLE_AT = (23, -16)         # a reminder's bubble: over his right shoulder, clear of hats and bottles
 DONE_AT = (28, -1)            # its Done button: under the bubble, clear of the bottle at his side
+REMINDER_SPOTS = (            # where they go, in order, so both are on a screen (bubble, button):
+    (BUBBLE_AT, DONE_AT),     # over his right shoulder
+    ((-16, -16), (-15, -1)),  # over his left one (clear of the nightcap's bobble), at a right edge
+    ((-16, -3), (-28, 3)),    # lower down on his left, the button beside it, up against the top
+)
+SPOT_SLACK = 6                # cells of room it needs to move back over his right shoulder
 BUBBLES = {"bubble", "water_bubble", "break_bubble"}
 MUG_AT = (22, 1)              # the mug in his right hand, handle in his grip (idle cells)
 BOTTLE_UP = (16, -15)         # the bottle held up high in the cheering frame
@@ -835,6 +843,20 @@ class Sprites:
                     "size": [len(cs["frames"][0][0]), len(cs["frames"][0])], "home": cs["home"],
                     "frames": [{"ms": 140, "rows": rows} for rows in cs["frames"]]},
                     {k: rgb(v) for k, v in cs["palette"].items()})
+        # Floating down: the parachute and umbrella, held by their anchor in his
+        # fists (the dangle grip), and a skydiving pose
+        self.held = {}
+        for name in ("parachute", "umbrella"):
+            if name in extras:
+                for i, img in enumerate(images(name)):
+                    self.props[f"{name}_{i}" if name == "parachute" else name] = img
+                self.held[name] = tuple(extras[name]["anchor"])
+        if "skydive" in extras:
+            sd = extras["skydive"]
+            self.anims["skydive"] = Anim("skydive", {
+                "size": [len(sd["frames"][0][0]), len(sd["frames"][0])], "home": sd["home"],
+                "frames": [{"ms": 90, "rows": rows} for rows in sd["frames"]]},
+                {k: rgb(v) for k, v in sd["palette"].items()})
         # nightcap_stretch: the nightcap with its tail flipped up, out of the left arm's way
         self.hats = {n: (images(n), tuple(extras[n]["anchor"])) for n in list(HATS) + ["nightcap_stretch"]}
         self.hats_flipped = {n: [flipped(img) for img in frames] for n, (frames, _) in self.hats.items()}
@@ -1610,6 +1632,7 @@ class ClawdPet(QWidget):
         self._remind_since = -REMIND_LOUD if self.reminding else 0.0   # back after a restart: calmly
         self._button_down = False
         self._nudge_until = 0.0
+        self._bits_at = None
         self.catcher = None                    # his DropCatcher, on KDE Wayland
         self._drag_over = False
         self._drag_seen = 0.0
@@ -1881,16 +1904,18 @@ class ClawdPet(QWidget):
             room_r += 300
         return room_l, room_r
 
-    def _seam(self, want, near=300):
+    def _seam(self, want, near=300, side=None):
         """A screen edge where the floor steps: "up" when the next screen's floor
         is higher than his, "down" when it's much lower and carries on at his
-        height. Nearer edges first. Returns (seam x, this area, other area)."""
+        height. Nearer edges first, or only the edge on `side` (-1 left, 1 right).
+        Returns (seam x, this area, other area)."""
         geo = self.screen_geometry()
         room_l, room_r = self._room()
         feet, mid = self._feet(), self._mid()
         s = self.scale
+        wanted = side
         for side, room in sorted(((-1, room_l), (1, room_r)), key=lambda t: t[1]):
-            if near is not None and room > near:
+            if (near is not None and room > near) or (wanted is not None and side != wanted):
                 continue
             seam = geo.left() if side < 0 else geo.left() + geo.width()
             probe = seam - 1 if side < 0 else seam
@@ -1962,6 +1987,7 @@ class ClawdPet(QWidget):
         if self.action in REMINDERS:
             self.lift = 0                       # stopped mid-hop: he lands, rather than hanging there
         self._dangling = False                  # off the pointer, whatever comes next
+        self.chute = None                       # and the parachute or umbrella packed away
         self._leave_cloud()                     # interrupted mid-scene: drop the props
         self.layers = {}
         self.vx = 0.0 if not self.airborne else self.vx
@@ -2139,6 +2165,8 @@ class ClawdPet(QWidget):
         if self.now - self._remind_checked >= 1000:
             self._remind_checked = self.now
             self._maybe_remind()
+        if self.reminding:
+            self._place_reminder_bits()
         if waiting:
             self.frame = ARMS_UP                 # "for me?"
         else:
@@ -2193,7 +2221,8 @@ class ClawdPet(QWidget):
         s = self.scale
         if self.airborne:
             if self.chute:                               # held up by it: a gentle fall, swaying
-                self.vy += (CHUTE_FALL * s - self.vy) * min(1.0, 4 * sec)
+                rate = 10 if self.vy > CHUTE_FALL * s else 4    # it catches the air hard
+                self.vy += (CHUTE_FALL * s - self.vy) * min(1.0, rate * sec)
                 self.vx *= math.exp(-1.5 * sec)
                 self._chute_t += sec
                 w = 2 * math.pi * CHUTE_SWAY[1]
@@ -2967,11 +2996,14 @@ class ClawdPet(QWidget):
                                 other.top() + other.height(), 10 * s)
         yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
 
-    def _act_climb(self):
-        """Pull out a ladder and climb to the neighbouring screen, up or down."""
+    def _act_climb(self, side=None):
+        """Pull out a ladder and climb to the neighbouring screen, up or down
+        (the nearer one, or the one on `side`). Whatever he's holding is put
+        away for the climb and back in his hand at the top."""
         left = self.box_span()[0]
         options = [(abs(seam[0] - left), seam, up)
-                   for seam, up in ((self._seam("up", near=None), True), (self._seam("down", near=None), False))
+                   for seam, up in ((self._seam("up", near=None, side=side), True),
+                                    (self._seam("down", near=None, side=side), False))
                    if seam is not None]
         if not options:
             return
@@ -2992,6 +3024,7 @@ class ClawdPet(QWidget):
         if up:
             yield from self._walk_to(on_ladder)
             self.pose("idle")
+            held, self.layers = self.layers, {}         # both hands for the ladder
             yield 250
             yield from self._ladder_out(rect, from_top=False)
             yield from self._climb_to(high)
@@ -3000,6 +3033,7 @@ class ClawdPet(QWidget):
         else:
             yield from self._walk_to(seam + s if lower_left else seam - width - s)
             self.pose("idle")
+            held, self.layers = self.layers, {}
             yield 250
             yield from self._ladder_out(rect, from_top=True)
             self.show_frame("jump", 2)
@@ -3007,6 +3041,7 @@ class ClawdPet(QWidget):
             yield from self._climb_to(low)
             self.scripted = False
         self.pose("idle")
+        self.layers = held
         yield from self._ladder_in()
 
     def _ladder_out(self, rect, from_top):
@@ -3983,6 +4018,50 @@ class ClawdPet(QWidget):
         if on and self.reminding:
             self._emit(self.reminding + "_bubble", *BUBBLE_AT, life=float("inf"))
             self._emit("done_button", *DONE_AT, life=float("inf"))
+            self._bits_at = None
+            self._place_reminder_bits()
+
+    def _place_reminder_bits(self):
+        """Keep the bubble and Done button where you can see them as he moves:
+        over his right shoulder, else his left (at a screen's right edge, or the
+        dead corner under a taller screen), else lower down on his left (up on a
+        window near the top). They stay put until the spot they're in stops
+        fitting, and only go back to his right with room to spare."""
+        bubble = next((q for q in self.particles if q["kind"] in ("water_bubble", "break_bubble")), None)
+        button = next((q for q in self.particles if q["kind"] in ("done_button", "done_button_pressed")), None)
+        if bubble is None or button is None:
+            return
+        key = (int(self.x), int(self.y), self.scale)
+        if key == self._bits_at:
+            return
+        self._bits_at = key
+        s, areas = self.scale, screen_areas()
+        ox, oy = int(self.x) + self.home_px.x(), int(self.y) + self.home_px.y()
+
+        def fits(spot, slack=0):
+            (bx, by), (dx, dy) = spot
+            gb, gd = self.sp.glyphs[bubble["kind"]], self.sp.glyphs[button["kind"]]
+            rects = (QRect(ox + (bx - slack) * s, oy + (by - 1) * s, (gb.width() + 2 * slack) * s, (gb.height() + 1) * s),
+                     QRect(ox + (dx - slack) * s, oy + dy * s, (gd.width() + 2 * slack) * s, gd.height() * s))
+            return all(any(a.contains(r) for a in areas) for r in rects)
+
+        now = ((int(bubble["x0"]), int(bubble["y0"])), (int(button["x0"]), int(button["y0"])))
+        if now != REMINDER_SPOTS[0] and fits(REMINDER_SPOTS[0], SPOT_SLACK):
+            spot = REMINDER_SPOTS[0]
+        elif now in REMINDER_SPOTS and fits(now):
+            return
+        else:
+            spot = next((sp for sp in REMINDER_SPOTS if fits(sp)), None)
+            if spot is None:                  # nothing fits quite: over whichever shoulder has room
+                geo = self.screen_geometry()  # side to side, brought down onto the screen
+                (bx, by), (dx, dy) = REMINDER_SPOTS[0]
+                if ox + (bx + self.sp.glyphs[bubble["kind"]].width()) * s > geo.left() + geo.width():
+                    (bx, by), (dx, dy) = REMINDER_SPOTS[1]
+                down = max(0, -(-(geo.top() - oy - (by - 1) * s) // s))
+                spot = ((bx, by + down), (dx, dy + down))
+        (bubble["x"], bubble["y0"]), (button["x"], button["y"]) = spot
+        bubble["x0"], button["x0"], button["y0"] = bubble["x"], button["x"], button["y"]
+        bubble["y"] = bubble["y0"] - (bubble["age"] // 400) % 2
 
     def _on_done_button(self, pos):
         pos = pos.toPoint() if hasattr(pos, "toPoint") else pos
@@ -4022,24 +4101,43 @@ class ClawdPet(QWidget):
         return self.screen_geometry()
 
     def _go_to_focus(self):
-        """To the middle of the screen you're working on: a trot if he's on its
-        floor already, one big leap across if he's on the other screen (or up
-        on a window)."""
+        """To the middle of the screen you're working on, the way he gets about
+        anyway: down off the window he's up on, along the floor, up a ladder to
+        a taller screen (or down one to a shorter one), and over to the middle.
+        Only somewhere a ladder can't reach does he take one big leap."""
         area = self._focus_area()
         s, wpx = self.scale, self.iw * self.scale
         target = area.left() + area.width() / 2 - wpx / 2
         floor = area.top() + area.height()
-        left = self.box_span()[0]
-        if abs(self._feet() - floor) < 2 and self.screen_geometry() == area:
-            if abs(target - left) > 30 * s:
+        if self._window_under() is not None:                  # up on a window: hop down first
+            here = self.screen_geometry()
+            self.show_frame("jump", 1)
+            yield 160
+            self.show_frame("jump", 2)
+            yield from self._arc_to(target if here == area else self.box_span()[0],
+                                    here.top() + here.height(), 8 * s)
+            yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
+        for _ in range(len(screen_areas())):                  # a screen at a time
+            here = self.screen_geometry()
+            if here == area or abs(self._feet() - (here.top() + here.height())) > 2:
+                break
+            toward = 1 if area.center().x() > here.center().x() else -1
+            if self._seam("up", near=None, side=toward) or self._seam("down", near=None, side=toward):
+                yield from self._act_climb(side=toward)
+            else:                                             # the floors meet: walk on over
+                yield from self._walk_to(here.left() + here.width() + 2 * s if toward > 0
+                                         else here.left() - wpx - 2 * s)
+            if self.screen_geometry() == here:                # couldn't get across
+                break
+        if self.screen_geometry() == area and abs(self._feet() - floor) < 2:
+            if abs(target - self.box_span()[0]) > 30 * s:
                 yield from self._walk_to(target)
-                self.pose("idle")
-            return
-        self.show_frame("jump", 1)                          # over there: one big leap
-        yield 160
-        self.show_frame("jump", 2)
-        yield from self._arc_to(target, floor, 30 * s)
-        yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
+        else:                                                 # somewhere a ladder can't reach
+            self.show_frame("jump", 1)
+            yield 160
+            self.show_frame("jump", 2)
+            yield from self._arc_to(target, floor, 30 * s)
+            yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
         self.pose("idle")
 
     def _act_remind_water(self):
@@ -4413,17 +4511,84 @@ class ClawdPet(QWidget):
             yield TICK_MS
 
     def _act_hop_down(self):
-        """Hop off the window he's on, off whichever end is nearer."""
+        """Walk to whichever end of the window he's on is nearer, and hop off it."""
         on = self._window_under()
         if on is None:
             return
+        s = self.scale
         room_l, room_r = self._room()
         side = -1 if room_l < room_r else 1
+        brink = (on[1] + 2 * s) if side < 0 else (on[2] - 2 * s)        # his middle, toes over
+        target = brink - self.iw * s / 2
+        if abs(target - self.box_span()[0]) > s:
+            yield from self._walk_to(target)
+            if self._window_under() is None:                           # it went from under him
+                return
         self.show_frame("jump", 1)
         yield 140
-        self.airborne = True
-        self.vx, self.vy = side * 40.0 * self.scale, -40.0 * self.scale
-        yield from self._fall()
+        yield from self._come_down(side * 55.0 * s, -55.0 * s)
+
+    def _drop_below(self, vx=0.0):
+        """How far it is down to what he'd land on (px)."""
+        cx = sum(self.box_span()) / 2 + vx * 0.4
+        feet = self._feet()
+        ys = [y for y, x0, x1, _ in self._surfaces() if x0 <= cx < x1 and y > feet + 2]
+        return (min(ys) - feet) if ys else 0.0
+
+    def _come_down(self, vx=0.0, vy=0.0):
+        """Down from up here: a plain drop if it isn't far (or now and then
+        anyway); from higher, floating down under an umbrella; from really
+        high, maybe a skydive first and then the parachute."""
+        s = self.scale
+        self.scripted = False
+        drop = self._drop_below(vx)
+        if drop < FLOAT_FROM * s or "umbrella" not in self.sp.props or random.random() < 0.25:
+            self.airborne, self.vx, self.vy = True, vx, vy
+            yield from self._fall()
+            return
+        yield from self._float_down(vx, vy, drop >= SKYDIVE_FROM * s and random.random() < 0.6)
+
+    def _held_at(self, name):
+        """Where a parachute or umbrella goes (layer cells) so its anchor is in his fists."""
+        ax, ay = self.sp.held[name.split("_")[0]]
+        at = self._frame_pos(("anim", "dangle", STRAIGHT, False))
+        gx, gy = self.sp.dangle_grip
+        s = self.scale
+        return (at.x() - self.home_px.x()) / s + gx - ax, (at.y() - self.home_px.y()) / s + gy - ay
+
+    def _float_down(self, vx, vy, parachute):
+        s = self.scale
+        start = self._feet()
+        self.airborne, self.vx, self.vy = True, vx, vy
+        self.show_frame("jump", 2)
+        while self.airborne and (self.vy < 0 or self._drop_below() < FLOAT_FROM * s / 2):
+            yield TICK_MS                                  # over the top of the hop, clear of the edge
+        if parachute and "skydive" in self.sp.anims:        # wheee: spread-eagled for a bit
+            k = 0
+            while self.airborne and self._feet() - start < SKYDIVE_FROM * s * 0.4:
+                self.show_frame("skydive", (k // 5) % 2)
+                k += 1
+                yield TICK_MS
+        if self.airborne:
+            self.show_frame("dangle", STRAIGHT)             # fists up, holding on
+            self._chute_t = 0.0
+            if parachute:                                   # pull the cord: pop...
+                self.layers = {"parachute_0": self._held_at("parachute_0")}
+                self.chute = "parachute"
+                yield 150
+                self.layers = {"parachute_1": self._held_at("parachute_1")}   # ...and it opens
+            else:
+                self.layers = {"umbrella": self._held_at("umbrella")}
+                self.chute = "umbrella"
+            k = 0
+            while self.airborne:                            # drifting down, swaying
+                self.show_frame("dangle_happy" if k % 90 < 60 else "dangle", STRAIGHT)
+                k += 1
+                yield TICK_MS
+        self.chute = None                                  # down, softly
+        self.layers = {}
+        self.pose("happy")
+        yield 600
 
     def _act_duck(self):
         """Something went fullscreen on his screen: drop out of sight until it's over."""
@@ -4526,10 +4691,7 @@ class ClawdPet(QWidget):
             yield from self._arc_to(hang_left, hang_feet, 3 * s, hold=True)
         if hang:
             yield from self._hang(random.uniform(3000, 7000))
-        self.scripted = False                                         # let go
-        self.airborne = True
-        self.vx, self.vy = random.uniform(-10, 10) * s, (0.0 if hang else -15.0 * s)
-        yield from self._fall()
+        yield from self._come_down(random.uniform(-10, 10) * s, 0.0 if hang else -15.0 * s)   # let go
 
     def _inspect(self, icon, side):
         """The investigation, floating beside `icon` (side +1: it's on his right)."""
@@ -4716,9 +4878,7 @@ class ClawdPet(QWidget):
         yield 700
         # the cloud slips away: a split second of cartoon physics, then down he goes
         yield from self._cloud_slips_away()
-        self.scripted = False
-        self.airborne, self.vx, self.vy = True, 0.0, 0.0
-        yield from self._fall()
+        yield from self._come_down()
 
     def _scan(self, ms):
         """Eyes going along the lines of the page."""
@@ -4857,7 +5017,8 @@ class ClawdPet(QWidget):
         elif self.reminding:
             self._nudge_until = self.now + 900     # "the button!": it flashes, he looks at it
             if self.frame[0] == "pose":
-                self.pose("look_r")
+                button = next((q for q in self.particles if q["kind"].startswith("done_button")), None)
+                self.pose("look_l" if button is not None and button["x"] < 0 else "look_r")
         elif not self.airborne:
             waking = self.action == "sleep"
             kind = self.click_kind()

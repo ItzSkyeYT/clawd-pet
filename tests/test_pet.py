@@ -747,6 +747,76 @@ class Birthday(unittest.TestCase):
 
 
 
+class FloatingDown(unittest.TestCase):
+    HIGH = [600, 700, 500, 400, 3, 0, 1, "eDP-1", "h"]          # its top 830 px above the floor
+    LOW = [600, 1490, 500, 100, 3, 0, 1, "eDP-1", "l"]          # only 40 px up
+
+    def setUp(self):
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.real = random.random
+
+    def tearDown(self):
+        random.random = self.real
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def stand_on(self, win, box_left):
+        self.pet.windows_changed([win])
+        self.pet.set_box_left(box_left)
+        self.pet.y = win[1] - self.pet.home_px.y() - self.pet.ih * self.pet.scale
+        self.pet.start("idle")
+        self.pet.advance(16)
+
+    def hop_off(self):
+        self.pet.play("hop_down")
+        seen, layers, vys = set(), set(), []
+        for _ in range(int(40_000 / 16)):
+            self.pet.advance(16)
+            seen.add(self.pet.frame[1])
+            layers |= set(self.pet.layers)
+            if self.pet.chute and self.pet.airborne:
+                vys.append(self.pet.vy)
+            if self.pet.action != "hop_down" and not self.pet.airborne:
+                break
+        return seen, layers, vys
+
+    def test_off_a_high_window_he_floats_down_under_an_umbrella(self):
+        random.random = lambda: 0.9                              # the umbrella, not a plain drop
+        self.stand_on(self.HIGH, 700)
+        seen, layers, vys = self.hop_off()
+        self.assertIn("umbrella", layers)
+        self.assertTrue(vys)
+        self.assertLessEqual(max(vys[20:]), cp.CHUTE_FALL * self.pet.scale * 1.05)
+        self.assertAlmostEqual(self.pet._feet(), 1530, delta=1)
+        self.assertIsNone(self.pet.chute)
+        self.assertEqual(self.pet.layers, {})
+
+    def test_from_high_up_a_skydive_then_the_parachute(self):
+        random.random = lambda: 0.5                              # float, and pick the parachute
+        self.stand_on(self.HIGH, 700)
+        seen, layers, vys = self.hop_off()
+        self.assertIn("skydive", seen)
+        self.assertTrue({"parachute_0", "parachute_1"} <= layers)
+        self.assertAlmostEqual(self.pet._feet(), 1530, delta=1)
+
+    def test_a_little_drop_is_just_a_hop(self):
+        random.random = lambda: 0.9
+        self.stand_on(self.LOW, 700)
+        seen, layers, vys = self.hop_off()
+        self.assertFalse(layers)
+        self.assertFalse(vys)
+
+    def test_the_canopy_hangs_from_his_fists(self):
+        self.pet.frame = ("anim", "dangle", cp.STRAIGHT, False)
+        for name in ("umbrella", "parachute_1"):
+            x, y = self.pet._held_at(name)
+            ax, ay = self.pet.sp.held[name.split("_")[0]]
+            s = self.pet.scale
+            gx, gy = self.pet._grip_in_window()
+            self.assertEqual((self.pet.home_px.x() + (x + ax) * s, self.pet.home_px.y() + (y + ay) * s),
+                             (gx - s, gy))                       # the anchor cell on his fists' cell
+
+
 class ClaudeHooks(unittest.TestCase):
     def setUp(self):
         random.seed(5)
@@ -1241,7 +1311,7 @@ class DesktopIcons(unittest.TestCase):
                 break
         self.assertEqual(pet.action, "idle")
         self.assertTrue(reached, "never reached into the folder")
-        self.assertEqual(props, {"page", "glasses"})
+        self.assertEqual(props - {"umbrella", "parachute_0", "parachute_1"}, {"page", "glasses"})
         self.assertIn("scrap", glyphs)
         self.assertLess(abs(first_scrap[0] - folder.top()), 4 * pet.scale)   # out of the top...
         self.assertLess(first_scrap[1], 0)                                    # ...flying up
@@ -1973,13 +2043,111 @@ class Reminders(unittest.TestCase):
         self.pet.start("idle")
         self.pet.advance(16)
 
+    def trip(self, ms=60_000):
+        """Run until he's cheering with the bottle; what he did on the way."""
+        seen, ladder, bottle_on_ladder, bits = set(), False, False, True
+        for _ in range(int(ms / 16)):
+            self.pet.advance(16)
+            seen.add(self.pet.frame[1])
+            if self.pet.ladder.isVisible():
+                ladder = True
+                if self.pet.frame[1] == "climb_ladder" and "water_bottle" in self.pet.layers:
+                    bottle_on_ladder = True
+            bits = bits and self.bits() == {"water_bubble", "done_button"}
+            if self.pet.frame[1] == "cheer":
+                break
+        return seen, ladder, bottle_on_ladder, bits
+
     def test_it_takes_him_to_the_middle_of_the_screen_you_are_on(self):
         self.put(200)                                               # he's on the laptop screen
         self.pet.windows_changed([self.HDMI])
         self.reminded()
-        self.assertTrue(run_ms(self.pet, 20_000, until=lambda: self.pet.frame[1] == "cheer"))
+        seen, ladder, bottle_on_ladder, bits = self.trip()
+        self.assertEqual(self.pet.frame[1], "cheer")
         self.assertAlmostEqual(self.middle(), 1920 + 960, delta=80)
         self.assertAlmostEqual(self.pet._feet(), 1080, delta=1)
+        self.assertTrue(ladder, "he should climb the ladder up to the taller screen")
+        self.assertIn("climb_ladder", seen)
+        self.assertFalse(bottle_on_ladder, "the bottle is put away for the climb")
+        self.assertTrue(bits, "the bubble and button stay up all the way")
+        self.assertIn("water_bottle", self.pet.layers)              # and back in his hand
+
+    def test_down_the_ladder_to_the_laptop_screen(self):
+        self.put(1920 + 1500)                                       # over on the HDMI screen
+        self.pet.windows_changed([self.LAPTOP])
+        self.reminded()
+        seen, ladder, bottle_on_ladder, bits = self.trip()
+        self.assertEqual(self.pet.frame[1], "cheer")
+        self.assertAlmostEqual(self.middle(), 960, delta=80)
+        self.assertAlmostEqual(self.pet._feet(), 1530, delta=1)
+        self.assertTrue(ladder)
+        self.assertIn("climb_ladder", seen)
+        self.assertTrue(bits)
+
+    def on_screen(self):
+        """Each reminder bit's rect (bubble at the top of its bob), on the desktop."""
+        out = {}
+        for q in self.pet.particles:
+            if q["kind"] in cp.REMINDER_BITS:
+                r = self.pet._glyph_rect(q)
+                if q["kind"].endswith("_bubble"):
+                    r = r.adjusted(0, -self.pet.scale, 0, 0)
+                r = r.translated(int(self.pet.x), int(self.pet.y))
+                out[q["kind"]] = any(a.contains(r) for a in cp.screen_areas())
+        return out
+
+    def test_the_bubble_stays_on_screen_wherever_he_is(self):
+        s, w = self.pet.scale, self.pet.iw * self.pet.scale
+        high = [2400, 90 + 20 * s, 800, 500, 5, 0, 1, "HDMI-A-1", "hi"]   # a window near the top
+        spots = [("laptop, right edge (the dead corner under the HDMI screen)", 1920 - w - 2, None),
+                 ("HDMI, right edge", 3840 - w - 2, None),
+                 ("laptop, left edge", 2, None),
+                 ("up on a window near the top", 2700, high)]
+        for name, left, win in spots:
+            self.pet.windows_changed([win] if win else [])
+            self.pet.set_box_left(left)
+            self.pet.y = self.pet.ground_y() if win is None else win[1] - self.pet.home_px.y() - self.pet.ih * s
+            self.pet.play("remind_water")
+            self.pet._remind_since = -cp.REMIND_LOUD                 # calm: he stays put
+            for _ in range(int(3000 / 16)):
+                self.pet.advance(16)
+                self.assertEqual(self.on_screen(), {"water_bubble": True, "done_button": True}, name)
+
+    def test_it_moves_round_him_as_you_drag_him(self):
+        self.pet.windows_changed([])
+        self.pet.set_box_left(800)
+        self.pet.y = self.pet.ground_y()
+        self.pet.play("remind_water")
+        self.pet._remind_since = -cp.REMIND_LOUD
+        run_ms(self.pet, 500)
+        right = {q["kind"]: q["x"] for q in self.pet.particles if q["kind"] in cp.REMINDER_BITS}
+        self.assertGreater(right["water_bubble"], 0)
+        drag(self.pet, 1920 - self.pet.iw * self.pet.scale - 2 - self.pet.box_span()[0], 0)
+        run_ms(self.pet, 100)
+        self.assertEqual(self.on_screen(), {"water_bubble": True, "done_button": True})
+        left = {q["kind"]: q["x"] for q in self.pet.particles if q["kind"] in cp.REMINDER_BITS}
+        self.assertLess(left["water_bubble"], 0)                    # over his other shoulder now
+
+    def test_on_his_left_it_is_clear_of_his_hat(self):
+        cp.wall_clock = lambda: datetime.datetime(2026, 9, 15, 23, 30)   # nightcap time
+        try:
+            self.pet.windows_changed([])
+            self.pet.set_box_left(1920 - self.pet.iw * self.pet.scale - 2)
+            self.pet.y = self.pet.ground_y()
+            self.pet.play("remind_water")
+            self.pet._remind_since = -cp.REMIND_LOUD
+            for _ in range(int(6000 / 16)):
+                self.pet.advance(16)
+                hat = self.pet._hat_image()
+                for q in self.pet.particles:
+                    if q["kind"] in cp.REMINDER_BITS:
+                        self.assertLess(q["x"], 0)
+                        if hat is not None:
+                            self.assertFalse(hat[1].intersects(self.pet._glyph_rect(q)), q["kind"])
+                        for img, r in self.pet._extras():
+                            self.assertFalse(r.intersects(self.pet._glyph_rect(q)), (q["kind"], self.pet.layers))
+        finally:
+            cp.wall_clock = lambda: AFTERNOON
 
     def test_on_that_screen_already_he_trots_over(self):
         self.put(100)
@@ -2008,7 +2176,7 @@ class Reminders(unittest.TestCase):
         self.reminded()
         run_ms(self.pet, 3000)
         self.pet.windows_changed([self.HDMI])                      # you moved over there
-        self.assertTrue(run_ms(self.pet, 20_000, until=lambda: self.middle() > 1920 and not self.pet.scripted
+        self.assertTrue(run_ms(self.pet, 60_000, until=lambda: self.middle() > 1920 and not self.pet.scripted
                                and self.pet.frame[1] == "cheer"))
         self.assertAlmostEqual(self.middle(), 1920 + 960, delta=80)
 
@@ -2574,13 +2742,13 @@ class Physics(unittest.TestCase):
         self.pet.timer.stop()
         self.pet.deleteLater()
 
-    def throw(self, vx, vy, height, step=16, ms=6000):
+    def throw(self, vx, vy, height, step=16, ms=6000, chute=None):
         pet = self.pet
         geo = pet.screen_geometry()
         pet.set_box_left(geo.left() + geo.width() / 2 - 150)
         pet.y = pet.ground_y() - height
         pet.start("fall")
-        pet.vx, pet.vy, pet.airborne = vx, vy, True
+        pet.vx, pet.vy, pet.airborne, pet.chute = vx, vy, True, chute
         track = []
         for _ in range(int(ms / step)):
             pet.advance(step)
@@ -2649,8 +2817,7 @@ class Physics(unittest.TestCase):
 
     def test_under_a_parachute_he_comes_down_gently_and_lands_softly(self):
         s = self.pet.scale
-        self.pet.chute = "parachute"
-        track = self.throw(30 * s, 0, 600)
+        track = self.throw(30 * s, 0, 600, chute="parachute")
         vys = [t[2] for t in track if t[3]]
         self.assertLessEqual(max(vys), cp.CHUTE_FALL * s * 1.05)       # never faster than the chute allows
         self.assertFalse(any(v < 0 for v in vys[10:]))                 # no bounce at the bottom
