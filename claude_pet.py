@@ -82,7 +82,7 @@ CLOUD_RISE = 28              # riding the cloud up to a desktop icon
 CLOUD_LIFT = 7               # sprite pixels he sits up in his cloud (as in Clawd-Cloud)
 RACE_SPEED = 45
 CLIMB_SPEED = 14
-LADDER_TIME = 8.0             # s: the longest a ladder climb takes (a tall one goes quicker)
+LADDER_TIME = 8.0             # s: the longest a climb takes, up a ladder or a window's side
 GRAVITY = 700
 
 # What he does on his own, and how often.
@@ -4752,6 +4752,13 @@ class ClawdPet(QWidget):
         win = self._window(wid)
         last = (win["x"], win["y"]) if win else None
         k = 0
+        base = CLIMB_SPEED * WINDOW_CLIMB * s             # a tall side goes quicker, like a tall ladder
+        if win is not None:
+            to_go = self._feet() - win["y"] if up else (goal if goal is not None else win["y"] + win["h"]) - self._feet()
+            speed = max(base, abs(to_go) / LADDER_TIME)
+        else:
+            speed = base
+        per_step = max(4, round(8 * base / speed))
         while True:
             win = self._window(wid)
             if win is None:                                 # gone: nothing to hold on to
@@ -4773,13 +4780,14 @@ class ClawdPet(QWidget):
                     self.y = self.ground_y()
                     self.pose("idle")
                 return True
-            if k % 8 == 0:                                  # the edge beside him (or the ladder frames)
+            if k % per_step == 0:                           # the edge beside him (or the ladder frames)
                 name = "climb_side" if "climb_side" in self.sp.anims else "climb"
                 steps = len(self.sp.anims[name].frames)
-                step = (k // 8) % steps if up else (-(k // 8) - 1) % steps   # down: the cycle backwards
+                n = k // per_step
+                step = n % steps if up else (-n - 1) % steps   # down: the cycle backwards
                 self.show_frame(name, step, name == "climb_side" and side > 0)
             k += 1
-            step = CLIMB_SPEED * WINDOW_CLIMB * s * TICK_MS / 1000
+            step = speed * TICK_MS / 1000
             self.y += -step if up else step
             if not up and goal is not None:
                 self.y = min(self.y, goal - self.home_px.y() - self.ih * s)

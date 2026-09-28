@@ -1058,6 +1058,20 @@ class PlayWithAGoal(unittest.TestCase):
         self.assertGreater(climbing, 3000)
         self.assertLess(climbing, (cp.LADDER_TIME + 0.5) * 1000)
 
+    def test_a_tall_side_is_climbed_briskly(self):
+        self.pet.windows_changed([[600, 450, 500, 1080, 3, 0, 0, "eDP-1", "t"]])   # 1080 px of side
+        self.at(1200)
+        self.pet.play("climb_window")
+        climbing = 0
+        for _ in range(int(60_000 / 16)):
+            self.pet.advance(16)
+            if self.pet.frame[1] == "climb_side":
+                climbing += 16
+            if self.pet.action != "climb_window":
+                break
+        self.assertEqual(self.pet._window_under()[3], "t")
+        self.assertLess(climbing, (cp.LADDER_TIME + 0.5) * 1000)
+
     def test_with_nothing_to_do_it_with_he_looks_puzzled(self):
         self.pet.windows_changed([])
         self.at(1400)
