@@ -622,6 +622,106 @@ class JumpingBetweenWindows(unittest.TestCase):
         self.assertIn("window_jump", picks)
 
 
+class Birthday(unittest.TestCase):
+    def setUp(self):
+        random.seed(24)
+        self.dir = tempfile.mkdtemp()
+        self.settings = QSettings(os.path.join(self.dir, "clawd.conf"), QSettings.Format.IniFormat)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=self.settings)
+        self.pet.start("idle")
+        run_ms(self.pet, 100)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def its(self, month, day):
+        self.pet.prefs["birthday"] = f"{month:02d}-{day:02d}"
+        self.pet.prefs["celebrate"] = True
+
+    def test_on_the_day_the_first_thing_he_does_is_throw_you_a_party(self):
+        self.its(9, 15)                                       # AFTERNOON is 15 September
+        self.pet.action = "idle"
+        self.pet._next()
+        self.assertEqual(self.pet.action, "birthday")
+        self.assertEqual(self.pet.hat(), "party_hat")          # and the hat, all day
+
+    def test_once_a_day_even_across_restarts(self):
+        self.its(9, 15)
+        self.pet.action = "idle"
+        self.pet._next()
+        self.assertTrue(run_ms(self.pet, 90_000, until=lambda: self.pet.action != "birthday"))
+        self.pet.settings.sync()
+        again = cp.ClawdPet(cp.load_sprites(), settings=QSettings(os.path.join(self.dir, "clawd.conf"),
+                                                                    QSettings.Format.IniFormat))
+        again.action = "idle"
+        again._next()
+        self.assertNotEqual(again.action, "birthday")
+        again.timer.stop()
+        again.deleteLater()
+
+    def test_not_on_other_days_or_when_you_are_away(self):
+        self.its(9, 16)
+        self.pet.action = "idle"
+        self.pet._next()
+        self.assertNotEqual(self.pet.action, "birthday")
+        self.its(9, 15)
+        self.pet._input_at = self.pet.now - 5 * 60_000         # nobody there yet
+        self.pet.action = "idle"
+        self.pet._next()
+        self.assertNotEqual(self.pet.action, "birthday")
+        self.pet.prefs["celebrate"] = False
+        self.pet._input_at = self.pet.now
+        self.pet.action = "idle"
+        self.pet._next()
+        self.assertNotEqual(self.pet.action, "birthday")
+
+    def test_a_leap_day_birthday_is_kept_on_the_28th(self):
+        self.pet.prefs["birthday"], self.pet.prefs["celebrate"] = "02-29", True
+        self.pet.wall = at(10, day=datetime.date(2027, 2, 28))
+        self.assertTrue(self.pet.is_birthday())
+        self.pet.wall = at(10, day=datetime.date(2028, 2, 28))  # a leap year: the real day comes
+        self.assertFalse(self.pet.is_birthday())
+
+    def test_he_grows_for_the_party_and_shrinks_back(self):
+        self.its(9, 15)
+        base = self.pet.scale
+        centre = sum(self.pet.box_span()) / 2
+        feet = self.pet._feet()
+        self.pet.play("birthday")
+        scales = set()
+        done = run_ms(self.pet, 90_000, until=lambda: scales.add(self.pet.scale) or self.pet.action != "birthday")
+        self.assertTrue(done)
+        self.assertIn(min(8, base * 2), scales)
+        self.assertEqual(self.pet.scale, base)
+        self.assertAlmostEqual(sum(self.pet.box_span()) / 2, centre, delta=base)
+        self.assertAlmostEqual(self.pet._feet(), feet, delta=1)
+
+    def test_a_restart_mid_party_keeps_your_size(self):
+        self.its(9, 15)
+        base = self.pet.scale
+        self.pet.play("birthday")
+        self.assertTrue(run_ms(self.pet, 10_000, until=lambda: self.pet.scale > base))
+        self.pet.save()
+        self.pet.settings.sync()
+        self.assertEqual(int(self.pet.settings.value("scale")), base)
+
+    def test_settings(self):
+        from PyQt6.QtCore import QDate
+        real = cp.hooks_installed
+        cp.hooks_installed = lambda path=None: (13, 13)
+        try:
+            d = cp.SettingsDialog(self.pet)
+            d.checks["celebrate"].setChecked(True)
+            d.birthday.setDate(QDate(2000, 7, 4))
+            self.assertEqual(self.pet.prefs["birthday"], "07-04")
+            self.assertIs(self.pet.prefs["celebrate"], True)
+            d.close()
+            d.deleteLater()
+        finally:
+            cp.hooks_installed = real
+
+
 class ClaudeHooks(unittest.TestCase):
     def setUp(self):
         random.seed(5)
@@ -1519,12 +1619,20 @@ class TimeAndSeasons(unittest.TestCase):
         self.pet.prefs["seasons"] = True
         self.assertIsNone(self.pet.hat())
 
-    def test_a_nightcap_for_sleeping_at_night(self):
+    def test_the_nightcap_all_night(self):
         self.pet.wall = at(23, 30)
         self.pet.start("sleep")
         self.assertEqual(self.pet.hat(), "nightcap")
+        self.pet.start("walk")                                   # up and about: still on
+        self.assertEqual(self.pet.hat(), "nightcap")
+        self.pet.wall = at(5, 59)
+        self.assertEqual(self.pet.hat(), "nightcap")
         self.pet.wall = at(14)
         self.assertIsNone(self.pet.hat())
+        self.pet.wall = at(23, 30, day=datetime.date(2026, 12, 10))
+        self.assertEqual(self.pet.hat(), "nightcap")             # over the Santa hat, at night
+        self.pet.wall = at(23, 30, day=datetime.date(2026, 12, 31))
+        self.assertEqual(self.pet.hat(), "party_hat")            # but not on New Year's Eve
 
     def test_his_nightcap_flips_its_tail_up_when_he_stretches(self):
         self.pet.wall = at(23, 30)
@@ -1644,6 +1752,17 @@ class Holidays(unittest.TestCase):
         self.assertGreater(len(self.confetti()), 5)
         run_ms(self.pet, 400)
         self.assertTrue(all(q["vy"] > -15 for q in self.confetti()))     # falling back down
+
+    def test_celebrations_bring_out_the_party_hat(self):
+        self.pet.prefs["hat"] = "none"
+        self.pet.celebrate = 120_000                            # Claude Code just finished a long job
+        self.pet._next()
+        self.assertEqual(self.pet.action, "celebrate")
+        self.assertEqual(self.pet.hat(), "party_hat")
+        self.pet.advance(16)
+        self.assertTrue(self.confetti())
+        run_ms(self.pet, 15_000, until=lambda: self.pet.action != "celebrate")
+        self.assertIsNone(self.pet.hat())                       # and off again
 
     def test_he_sees_the_new_year_in_once(self):
         self.pet.wall = at(0, 5, day=datetime.date(2027, 1, 1))
@@ -2097,10 +2216,24 @@ class GrabThePointer(unittest.TestCase):
         self.pet.cursor_moved(x + 200, y + 50)
         self.assertEqual((self.pet.x, self.pet.y), before)     # no longer following the pointer
 
-    def test_no_hat_while_he_hangs(self):
+    def test_his_hat_stays_on_while_he_hangs_and_clicks_still_go_through(self):
         self.pet.prefs["hat"] = "santa_hat"
-        self.hang_on()
-        self.assertIsNone(self.pet.hat())
+        x, y = self.hang_on()
+        self.assertEqual(self.pet.hat(), "santa_hat")
+        self.assertIsNotNone(self.pet._hat_image())
+        for k in range(120):
+            px, py = x + int(200 * math.sin(k / 9)), y + int(80 * math.cos(k / 7))
+            self.pet.cursor_moved(px, py)
+            self.pet.advance(16)
+            self.assertFalse(self.pet._mask.contains(QPoint(px - int(self.pet.x), py - int(self.pet.y))), k)
+
+    def test_his_hat_goes_round_with_him(self):
+        self.pet.prefs["hat"] = "santa_hat"
+        x, y = self.hang_on()
+        seen, _ = self.circle(x, y, 70, 1.6, 3000)
+        spun = {f[1] for f, _ in seen if f[1].startswith("spin")}
+        self.assertTrue(spun)
+        self.assertTrue(all(name.endswith("_santa_hat") for name in spun), spun)
 
     def test_claude_code_waits_until_he_lets_go(self):
         self.hang_on()

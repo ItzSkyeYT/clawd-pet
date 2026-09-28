@@ -141,8 +141,16 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
 - `head_of()` finds each frame's head when sprites load (`Anim.heads`); `_hat_image()`
   places the hat's anchor there, mirrored with him, and `paint()` redraws whatever
   reaches up past his head (raised arms) over the brim (`_reaching_up()`)
-- `hat()`: the menu/settings choice, else a nightcap for night naps, else
-  `season_hat(date)`. `wall_clock()` is the only clock read (tests pin it)
+- `hat()`: the birthday party hat (all day) > the party hat during `PARTIES` scenes > the
+  hat you picked > New Year's party hat > the nightcap all night > `season_hat(date)`.
+  `wall_clock()` is the only clock read (tests pin it)
+- Hanging frames place hats from the art's eye positions (`dangle_head()`): the clasped
+  fists are as wide as a head, which fooled `head_of()`. Spin frames have the hat baked
+  in before turning (`Sprites.spin_anim(face, hat)`, built on first use), arms in front
+- The birthday: `is_birthday()` (29 February kept on the 28th in other years),
+  `_birthday_due()` (once a day, remembered in QSettings `birthday_done`, when you're
+  there), `_act_birthday()`. He grows with `_resize_in_place()` about his middle; the size
+  you chose is kept in `_true_scale` so `save()` never stores the party size
 - Night (`night_from` to `night_to`, minutes after midnight, 22:00-06:00 by default, may
   or may not cross midnight): sleepy rests, yawns, naps weighted up, lively scenes down.
   Morning (`night_to` to `morning_to`, until 11:00): `_act_morning` once a day, when you're there

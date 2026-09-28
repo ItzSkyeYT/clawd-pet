@@ -92,11 +92,20 @@ to what Claude Code is doing.
   he has no eyes), whips back with a "!" and jumps. Plasma slideshows change on the clock
   (whole multiples of the interval, 15 min by default), so he's ready for each one; a
   wallpaper you set yourself is caught from Plasma's config
-- **Time and seasons** (from the clock): sleepier at night (yawns, longer naps in a
-  nightcap), a stretch and a mug of coffee on the first morning visit (night 22:00-06:00
-  and mornings until 11:00 by default; both are set in Settings), a Santa hat in
+- **Time and seasons** (from the clock): sleepier at night (yawns, longer naps) and in
+  his nightcap all night long, a stretch and a mug of coffee on the first morning visit
+  (night 22:00-06:00 and mornings until 11:00 by default; both are set in Settings), a Santa hat in
   December, a party hat with confetti at New Year (and a dance at midnight), a pumpkin
   with bats in the week before Halloween
+- **Your birthday** (Settings → Time and seasons): the first time he sees you that day he
+  notices the date, puffs up to double size, jumps about in confetti with HAPPY BIRTHDAY
+  popping up above him and balloons rising, brings out a cake, makes a wish, blows out the
+  candles, dances and shrinks back. Once a day (remembered across restarts), and the
+  party hat stays on all day, whatever else is set. Play → "Birthday party" previews it
+- **Hats**, strongest first: your birthday's party hat; the party hat at any celebration
+  (Claude Code finishing a job, New Year, the birthday party); a hat you picked; New
+  Year's party hat; the nightcap all night; the season's. They stay on while he hangs
+  off the pointer, and go round with him when he's spun
 - **Reminders**: water every 45 min (he runs over to you, hops up and down waving a bottle,
   then holds it out) and a break after 60 min at it (a look, a wave, a hop). A bubble and
   a green **Done** button stay up until you press the button: through being dragged or

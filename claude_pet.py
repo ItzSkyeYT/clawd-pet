@@ -14,6 +14,7 @@ Right-click: menu    Drag: pick him up and throw him    Stroke him: he likes it
 """
 
 import ast
+import calendar
 import collections
 import datetime
 import json
@@ -41,14 +42,14 @@ if (sys.platform.startswith("linux") and os.environ.get("WAYLAND_DISPLAY")
     os.environ["QT_QPA_PLATFORM"] = "xcb"
     _FORCED_XCB = True
 
-from PyQt6.QtCore import (QElapsedTimer, QFileSystemWatcher, QObject, QPoint, QRect, QSettings, Qt, QTime,
-                          QTimer,
+from PyQt6.QtCore import (QDate, QElapsedTimer, QFileSystemWatcher, QObject, QPoint, QRect, QSettings, Qt,
+                          QTime, QTimer,
                           pyqtClassInfo, pyqtSlot)
 from PyQt6.QtGui import (QActionGroup, QBitmap, QCursor, QGuiApplication, QIcon, QImage, QPainter,
                          QPixmap, QRegion)
 from PyQt6.QtNetwork import QLocalServer
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout,
-                             QGroupBox, QHBoxLayout, QLabel, QMenu, QPushButton, QSpinBox,
+                             QDateEdit, QGroupBox, QHBoxLayout, QLabel, QMenu, QPushButton, QSpinBox,
                              QSystemTrayIcon, QTimeEdit, QVBoxLayout, QWidget)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -99,16 +100,18 @@ LABELS = {
     "climb_window": "Climb up the side of a window", "climb_down": "Climb down the side of a window",
     "window_jump": "Jump to another window",
     "yawn": "Yawn and stretch", "morning": "Good morning (stretch and coffee)", "coffee": "Coffee",
+    "birthday": "Birthday party",
     "remind_break": "Reminder: take a break", "remind_water": "Reminder: drink some water",
     "grab": "Grab the pointer",
 }
 ON_A_WINDOW = ["walk", "wave", "jump", "jump_happy", "dance", "laptop", "sparkler", "sleep", "yawn"]
 LIVELY = ("dance", "race", "sparkler", "jump", "jump_happy", "cloud")   # calmer at night
 BOUNCY = {"walk", "dance", "jump", "jump_happy", "celebrate", "race", "wave"}   # a hat's pom-pom swings
+PARTIES = ("celebrate", "new_year", "birthday")   # celebrations: the party hat, confetti
 AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["perch_window", "hop_down", "climb_window", "climb_down", "window_jump",
                                         "visit", "read"]
 CLAUDE_PREVIEWS = ["work", "attention", "celebrate"]
-TIME_SCENES = ["yawn", "morning", "coffee", "remind_break", "remind_water"]
+TIME_SCENES = ["yawn", "morning", "coffee", "birthday", "remind_break", "remind_water"]
 POINTER_SCENES = ["grab"]
 PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + TIME_SCENES + POINTER_SCENES + ["idle"])
 
@@ -132,6 +135,8 @@ PREF_DEFAULTS = {
     "morning_to": 11 * 60,    # ...and the morning ends
     "seasons": True,          # hats and extras on holidays
     "hat": "auto",            # auto (by date and time) | none | one of HATS
+    "celebrate": False,       # a party on your birthday...
+    "birthday": "",           # ...this day ("MM-DD")
     "breaks": True,           # break reminders...
     "break_every": 60,        # ...after this many minutes at the computer
     "water": True,            # water reminders...
@@ -569,6 +574,13 @@ def typing_eyes(rows, kind, body, ink):
     return ["".join(r) for r in g]
 
 
+def dangle_head(eyes):
+    """Where a hat goes on a frame with these eyes (their 2x2 top-left cells):
+    his head's top is 2 rows above them, its centre line between them."""
+    (lx, ly), (rx, ry) = eyes
+    return (lx + rx + 2) // 2, min(ly, ry) - 2
+
+
 def eyes_rows(rows, eyes, kind, body, ink):
     """A frame with its eyes (2x2, top-left cells in `eyes`) redrawn as an
     expression, the way pose_rows draws them on the idle pose."""
@@ -794,6 +806,8 @@ class Sprites:
                 "frames": [{"ms": 100, "rows": eyes_rows(f, eyes[i], kind, "#", "@")}
                            for i, f in enumerate(dg_frames)]}, dg_pal)
             self.anims[name].grip = (grip[0] + 1, grip[1])
+            # his head from his eyes: the clasped fists are as wide as a head
+            self.anims[name].heads = [dangle_head(e) for e in eyes]
         # Whirled right round: his straight hang turned about his hands, in
         # SPIN_STEPS steps, with the pivot where the hand-drawn frames hold on
         straight = dg_frames[STRAIGHT]
@@ -802,13 +816,11 @@ class Sprites:
                     for y, r in enumerate(straight) for x, ch in enumerate(r) if ch != ".")
         size = 2 * (int(reach) + 2)
         spin_home = [size // 2 - (pivot[0] - dg_home[0]), size // 2 - (pivot[1] - dg_home[1])]
+        self._spin = {"rows": straight, "eyes": eyes[STRAIGHT], "pivot": pivot, "size": size,
+                      "home": spin_home, "palette": dg_pal, "home_y": dg_home[1], "extras": extras}
         for kind in ("happy", "surprised"):
-            rows = eyes_rows(straight, eyes[STRAIGHT], kind, "#", "@")
-            name = "spin_" + kind
-            self.anims[name] = Anim(name, {"size": [size, size], "home": spin_home, "frames": [
-                {"ms": 100, "rows": r} for r in turned_frames(rows, pivot, SPIN_STEPS, size)]}, dg_pal)
-            self.anims[name].grip = (size // 2, size // 2)
-            self.anims[name].heads = [None] * SPIN_STEPS        # no hats upside down
+            self.spin_anim(kind, None)
+
         # which way the lean frames swing him (+1: to the frame's right)
         lean = dg_frames[LEAN_2]
         cells = [x for r in lean for x, c in enumerate(r) if c != "."]
@@ -836,6 +848,42 @@ class Sprites:
         for name in ("steam", "bat", "confetti", "droplet"):
             for i, img in enumerate(images(name)):
                 (self.props if name == "steam" else self.glyphs)[f"{name}_{i}"] = img
+
+    def spin_anim(self, face, hat):
+        """The frames of him whirled right round (see turned_frames), with
+        `face`, and `hat` baked in so it goes round with him. Built the first
+        time they're wanted."""
+        name = "spin_" + face + ("_" + hat if hat else "")
+        if name in self.anims:
+            return name
+        sp = self._spin
+        rows = eyes_rows(sp["rows"], sp["eyes"], face, "#", "@")
+        pal, pivot = dict(sp["palette"]), sp["pivot"]
+        if hat:
+            e = sp["extras"][hat]
+            free = iter(k for k in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789" if k not in pal)
+            remap = {k: next(free) for k in e["palette"]}
+            pal.update({remap[k]: rgb(v) for k, v in e["palette"].items()})
+            (cx, top), (ax, ay) = dangle_head(sp["eyes"]), e["anchor"]
+            pad = max(0, ay - top)
+            grid = [["."] * len(rows[0]) for _ in range(pad)] + [list(r) for r in rows]
+            top, pivot = top + pad, (pivot[0], pivot[1] + pad)
+            for y, row in enumerate(e["frames"][0]):
+                for x, ch in enumerate(row):
+                    gx, gy = cx - ax + x, top - ay + y
+                    if ch != "." and 0 <= gx < len(grid[0]) and 0 <= gy < len(grid):
+                        grid[gy][gx] = remap[ch]
+            for y in range(top):                            # his arms go up in front of the hat
+                for x, ch in enumerate(rows[y - pad] if y >= pad else ""):
+                    if ch != ".":
+                        grid[y][x] = ch
+            rows = ["".join(r) for r in grid]
+        size = sp["size"]
+        self.anims[name] = Anim(name, {"size": [size, size], "home": sp["home"], "frames": [
+            {"ms": 100, "rows": r} for r in turned_frames(rows, pivot, SPIN_STEPS, size)]}, pal)
+        self.anims[name].grip = (size // 2, size // 2)
+        self.anims[name].heads = [None] * SPIN_STEPS        # the hat's already on
+        return name
 
 
 def cloud_platform(data, palette):
@@ -1543,6 +1591,8 @@ class ClawdPet(QWidget):
         self._sure_armed = True                # a pointer held right above him gets grabbed
         self._morning = None                   # the day he last had his morning coffee
         self._startled_at = -1e9               # when the wallpaper last gave him a fright
+        self._party_done = None                # (without QSettings) the day of the last birthday party
+        self._true_scale = None                # your size, while he's blown up big for a party
         self._new_year = None                  # the year he last saw in
         self._input_at = 0.0                   # when you last moved the pointer or sent a prompt
         self._streak_at = 0.0                  # since when you've been at it without a break
@@ -1890,7 +1940,7 @@ class ClawdPet(QWidget):
     def save(self):
         if self.settings is None:
             return
-        self.settings.setValue("scale", self.scale)
+        self.settings.setValue("scale", self._true_scale or self.scale)
         self.settings.setValue("left", self.box_span()[0])
         screen = QApplication.screenAt(QPoint(int(self.box_span()[0]), int(self._mid())))
         if screen is not None:
@@ -1944,6 +1994,8 @@ class ClawdPet(QWidget):
         elif self.greet:
             self.greet = False
             self.start("wave")
+        elif self.action == "idle" and self._birthday_due():
+            self.start("birthday", manual=True)
         elif self.action == "idle" and self._new_year_due():
             self.start("new_year")
         elif self.action == "idle":
@@ -2045,7 +2097,7 @@ class ClawdPet(QWidget):
         if self.now < self._nudge_until:
             wait = min(wait, 75)
         for q in self.particles:
-            if q.get("flap") or q.get("g") or q.get("orbit"):
+            if q.get("flap") or q.get("g") or q.get("orbit") or q.get("wave"):
                 return TICK_MS
             speed = max(abs(q["vx"]), abs(q["vy"]))          # cells/s: redraws needed per second
             wait = min(wait, 500 / speed if speed else 200)
@@ -2427,9 +2479,10 @@ class ClawdPet(QWidget):
     def pose(self, name):
         self.frame = ("pose", name, False)
 
-    def _emit(self, kind, x, y, vx=0.0, vy=0.0, life=3000.0, g=0.0, flap=None, orbit=None):
-        self.particles.append({"kind": kind, "x": x, "y": y, "y0": y, "age": 0.0,
-                               "life": life, "vx": vx, "vy": vy, "g": g, "flap": flap, "orbit": orbit})
+    def _emit(self, kind, x, y, vx=0.0, vy=0.0, life=3000.0, g=0.0, flap=None, orbit=None, wave=None):
+        self.particles.append({"kind": kind, "x": x, "y": y, "x0": x, "y0": y, "age": 0.0,
+                               "life": life, "vx": vx, "vy": vy, "g": g, "flap": flap, "orbit": orbit,
+                               "wave": wave})
 
     def _bubble(self, on, kind="bubble"):
         """A speech bubble over his right shoulder ("!", coffee, water), moved
@@ -2448,14 +2501,19 @@ class ClawdPet(QWidget):
             elif q["kind"] in ("done_button", "done_button_pressed"):
                 flash = self.now < self._nudge_until and int(self.now // 150) % 2 == 0
                 q["kind"] = "done_button_pressed" if self._button_down or flash else "done_button"
+            elif q.get("wave"):                                # bobbing letters, swaying balloons
+                ax, ay, w, phase = q["wave"]
+                t = q["age"] / 1000
+                q["x"] = q["x0"] + q["vx"] * t + ax * math.sin(phase + w * t)
+                q["y"] = q["y0"] + q["vy"] * t + ay * math.sin(phase + w * t)
             elif q.get("orbit"):                               # circling his head (dizzy stars)
                 cx, cy, rx, ry, w, phase = q["orbit"]
                 a = phase + w * q["age"] / 1000
                 q["x"], q["y"] = cx + rx * math.cos(a), cy + ry * math.sin(a)
-            elif q.get("flap"):                                # a bat: wings up, wings down, bobbing
+            elif q.get("flap"):                                # a bat flapping, a curl of smoke
                 q["kind"] = q["flap"][int(q["age"] // 130) % len(q["flap"])]
                 q["x"] += q["vx"] * dt / 1000
-                q["y"] = q["y0"] + 1.5 * math.sin(q["age"] / 160)
+                q["y"] = q["y0"] + q["vy"] * q["age"] / 1000 + (1.5 * math.sin(q["age"] / 160) if not q["vy"] else 0)
             else:
                 q["vy"] += q.get("g", 0.0) * dt / 1000
                 q["x"] += q["vx"] * dt / 1000
@@ -2521,19 +2579,25 @@ class ClawdPet(QWidget):
         return (m >= start or m < end) if start > end else start <= m < end
 
     def hat(self):
-        """The hat he's wearing right now, or None."""
-        if self._dangling:                     # it would reach up past the pointer's tip
-            return None
+        """The hat he's wearing right now, or None. Your birthday: the party hat
+        all day, whatever else is set. Any celebration: the party hat. Then the
+        hat you picked; else New Year's party hat; else, all night, his
+        nightcap; else the season's (Santa, pumpkin)."""
+        if self.prefs["celebrate"] and self.is_birthday():
+            return "party_hat"
+        if self.action in PARTIES:                 # any celebration: the party hat goes on
+            return "party_hat"
         choice = self.prefs["hat"]
         if choice in HATS:
             return choice
         if choice != "auto":
             return None
-        if self.prefs["day_cycle"] and self.action == "sleep" and self.is_night():
-            return "nightcap"
-        if self.prefs["seasons"]:
-            return season_hat(self.wall().date())
-        return None
+        season = season_hat(self.wall().date()) if self.prefs["seasons"] else None
+        if season == "party_hat":                  # New Year's Eve and Day: party, night or not
+            return season
+        if self.prefs["day_cycle"] and self.is_night():
+            return "nightcap"                      # all night long, asleep or not
+        return season
 
     def _hat_key(self):
         """Which hat, and which of its frames: the Santa hat's pom-pom and the
@@ -3247,6 +3311,123 @@ class ClawdPet(QWidget):
         yield from self._walk_to(geo.left() + back if side < 0 else right_edge - width - back)
         self.offscreen = False
 
+    # ── Your birthday ─────────────────────────────────────────────
+
+    def _resize_in_place(self, scale):
+        """Bigger or smaller about his middle, feet on the floor, not saved."""
+        centre, bottom = sum(self.box_span()) / 2, self._feet()
+        self.scale = scale
+        self._pixmaps.clear()
+        self._masks.clear()
+        self._layout()
+        self.set_box_left(centre - self.iw * scale / 2)
+        self.y = bottom - self.home_px.y() - self.ih * scale
+        self.move(int(self.x), int(self.y))
+        self._shown = None
+
+    def _grow(self, to):
+        """Puff up (or back down) a size at a time, with a springy overshoot."""
+        step = 1 if to > self.scale else -1
+        for sc in list(range(self.scale + step, to + step, step)) + ([to + step, to] if 3 <= to + step <= 8 else []):
+            self._resize_in_place(sc)
+            yield 70
+
+    def _act_birthday(self):
+        """It's your birthday: he notices the date, puffs up to double size in a
+        party hat, jumps about in confetti with HAPPY BIRTHDAY popping up above
+        him and balloons floating up, brings out a cake, makes a wish, blows out
+        the candles, dances, and shrinks back. Once a day; the hat stays on."""
+        today = self.wall().date().isoformat()
+        if self.settings is not None:
+            self.settings.setValue("birthday_done", today)
+        self._party_done = today
+        yield from self._come_back()
+        base = self._true_scale or self.scale
+        self._true_scale = base
+        # it's today!
+        self.pose("look_l")
+        yield 300
+        self.pose("look_r")
+        yield 300
+        self.pose("surprised")
+        self._emit("excl", 11, -8, vy=-2, life=900)
+        yield 700
+        # ta-da: twice the size
+        self.pose("happy")
+        yield from self._grow(min(8, base * 2))
+        yield 300
+        for k in range(3):
+            self._confetti(18)
+            yield from self._once("jump_happy")
+        yield from self._birthday_words()
+        yield from self._balloons()
+        yield from self._birthday_cake()
+        self._confetti(24)
+        yield from self._act_dance()
+        yield from self._grow(base)
+        self._true_scale = None
+        self._resize_in_place(base)
+        self.pose("happy")
+        yield 900
+
+    def _birthday_words(self):
+        """HAPPY / BIRTHDAY! popping up letter by letter above him, then bobbing."""
+        letters = getattr(self.sp, "letters", None)
+        if not letters:
+            yield 0
+            return
+        gap = 1
+        lines = ("HAPPY", "BIRTHDAY!")
+        h = max(img.height() for img in letters.values())
+        base_y = -14 - 2 * (h + 2)                             # above his head and party hat
+        k = 0
+        for row, word in enumerate(lines):
+            width = sum(letters[ch].width() for ch in word) + gap * (len(word) - 1)
+            x = self.iw / 2 - width / 2
+            y = base_y + row * (h + 2)
+            for ch in word:
+                self._emit("letter_" + ch, x, y, life=16_000, wave=(0.0, 0.8, 5.0, k * 0.55))
+                x += letters[ch].width() + gap
+                k += 1
+                yield 70
+        yield 600
+
+    def _balloons(self):
+        n = sum(1 for k in self.sp.glyphs if k.startswith("balloon_"))
+        for k in range(5 if n else 0):
+            self._emit(f"balloon_{k % n}", random.uniform(-10, self.iw + 4), random.uniform(0, 8),
+                       vy=-random.uniform(3.5, 5.5), life=9000, wave=(1.2, 0.0, random.uniform(2, 3), k))
+            yield 220
+        yield 300
+
+    def _birthday_cake(self):
+        """The cake on the floor beside him: a wish, a big breath, candles out."""
+        if "cake_0" not in self.sp.props:
+            yield 0
+            return
+        hx, hy = self.sp.cake_hold
+        at = (self.iw + 2 + self.sp.props["cake_0"].width() / 2 - hx, self.ih - hy)   # standing beside him
+        for k in range(8):                                  # lit, the flames flickering
+            self.layers = {f"cake_{k % 2}": at}
+            if k == 3:
+                self.pose("blink")                          # eyes shut: a wish
+            yield 160
+        self.pose("happy")
+        yield 300
+        face = (self.iw - 4, 4)
+        for k in range(4):                                  # a big puff at the candles
+            self._emit(f"puff_{k % 2}", face[0] + k * 2, face[1] + random.uniform(-1, 1), vx=12, life=450)
+            yield 90
+        self.layers = {"cake_2": at}                         # out
+        for fx, fy in self.sp.cake_flames:
+            self._emit("smoke_0", at[0] + fx - 1, at[1] + fy - 4, vy=-3, life=1600,
+                       flap=("smoke_0", "smoke_1", "smoke_2"))
+        for k in range(3):
+            self._emit("heart", self.iw / 2 - 2 + random.uniform(-6, 6), -3.0,
+                       vx=random.uniform(-1, 1), vy=-4.0, life=1400)
+        yield 1400
+        self.layers = {}
+
     # ── The wallpaper ─────────────────────────────────────────────
 
     def watch_wallpaper(self, path=PLASMA_DESKTOP_RC):
@@ -3589,7 +3770,8 @@ class ClawdPet(QWidget):
             swing = abs(self._swing)
             if swing > SPIN_FROM:                    # turned round: the rotated frames
                 k = round(self._swing / (2 * math.pi / SPIN_STEPS)) % SPIN_STEPS
-                self.show_frame("spin_surprised" if abs(self._swing_v) > 6 else "spin_happy", k)
+                hat = self.hat()
+                self.show_frame(self.sp.spin_anim("surprised" if abs(self._swing_v) > 6 else "happy", hat), k)
                 self._place_on_pointer()
                 yield TICK_MS
                 continue
@@ -3660,6 +3842,22 @@ class ClawdPet(QWidget):
             self._emit("z_small", x, y, vx=0.7, vy=-2.0, life=2500)
         self.pose("idle")
         yield 600
+
+    def is_birthday(self):
+        """Is today your birthday? (A 29 February one is kept on the 28th in other years.)"""
+        b = self.prefs["birthday"]
+        if not b:
+            return False
+        today = self.wall().date()
+        if b == "02-29" and not calendar.isleap(today.year):
+            b = "02-28"
+        return today.strftime("%m-%d") == b
+
+    def _birthday_due(self):
+        today = self.wall().date().isoformat()
+        done = self.settings.value("birthday_done") if self.settings is not None else self._party_done
+        return (self.prefs["celebrate"] and self.is_birthday() and done != today
+                and self.now - self._input_at < PRESENT)
 
     def _morning_due(self):
         return (self.prefs["day_cycle"] and not self.prefs["quiet"] and self.is_morning()
@@ -4848,6 +5046,16 @@ class SettingsDialog(QDialog):
             edit.timeChanged.connect(lambda t, k=key: pet.set_pref(k, t.hour() * 60 + t.minute()))
             row.addWidget(edit)
             self.times[key] = edit
+        row.addStretch(1)
+        lay.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(self._check("celebrate", "A party on my birthday:"))
+        self.birthday = QDateEdit()
+        self.birthday.setDisplayFormat("d MMMM")
+        b = pet.prefs["birthday"] or "01-01"
+        self.birthday.setDate(QDate(2000, int(b[:2]), int(b[3:])))
+        self.birthday.dateChanged.connect(lambda d: pet.set_pref("birthday", d.toString("MM-dd")))
+        row.addWidget(self.birthday)
         row.addStretch(1)
         lay.addLayout(row)
         row = QHBoxLayout()
