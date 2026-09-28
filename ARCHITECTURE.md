@@ -64,7 +64,10 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
 - The ladder is a separate unmanaged, click-through window (`Prop`), placed on the
   lower screen by the seam and revealed from the top or bottom
 - Desktop icons come from Plasma's folder-view config (`positions=`), laid out with
-  the same maths as Plasma's FolderView.qml (cell size, extra spacing, icon offset)
+  the same maths as Plasma's FolderView.qml (cell size, extra spacing, icon offset);
+  entries that are directories get the reading scene
+- Layered frames: base frame (raised by `lift`), then `layers` (props), then `front`
+  (the cloud platform), then particles; the window mask covers all of them
 
 ## Platform notes
 - Unmanaged window (`X11BypassWindowManagerHint`): KWin keeps managed X11 windows

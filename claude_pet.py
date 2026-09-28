@@ -53,6 +53,7 @@ WALK_SPEED, WALK_TEMPO = 15, 0.7
 TRIP_SPEED, TRIP_TEMPO = 24, 0.5
 CLOUD_SPEED = 30
 CLOUD_RISE = 28              # riding the cloud up to a desktop icon
+CLOUD_LIFT = 7               # sprite pixels he sits up in his cloud (as in Clawd-Cloud)
 RACE_SPEED = 45
 CLIMB_SPEED = 14
 GRAVITY = 700
@@ -69,9 +70,9 @@ LABELS = {
     "dance": "Dance", "laptop": "Laptop", "sparkler": "Sparkler",
     "cloud": "Ride the cloud", "race": "Go karting", "lurk": "Peek from the edge",
     "sleep": "Nap", "climb": "Climb to the other screen", "leap": "Leap to the other screen",
-    "visit": "Visit a desktop icon",
+    "visit": "Visit a desktop icon", "read": "Read something from a desktop folder",
 }
-PLAYABLE = set(ACTIONS + BETWEEN_SCREENS + ["visit", "idle", "work", "attention", "celebrate"])
+PLAYABLE = set(ACTIONS + BETWEEN_SCREENS + ["visit", "read", "idle", "work", "attention", "celebrate"])
 
 # Where the eyes sit in the idle pose (top-left of each 2x2 eye).
 EYES = ((6, 2), (16, 2))
@@ -80,6 +81,8 @@ INK = (20, 20, 19)            # Anthropic's near-black, as in the official art
 IVORY = (250, 249, 245)
 BLUE = (106, 155, 204)        # Claude Code's own "professional blue"
 PINK = (232, 91, 106)
+GOLD = (238, 200, 117)        # the sparkler's sparks
+GREY = (156, 154, 146)
 RAIL_DARK = (77, 76, 72)      # the kart's greys
 RAIL_LIGHT = (156, 154, 146)
 
@@ -99,7 +102,36 @@ GLYPHS = {
                 ".###+###.",
                 "...#+#...",
                 "....#...."], {"#": INK, "+": IVORY, "@": INK}),
+    # reading a story
+    "drop": ([".#.", "###", "###", ".#."], {"#": BLUE}),
+    "excl": (["##", "##", "##", "..", "##"], {"#": INK}),
+    "question": ([".###.", "#...#", "...#.", "..#..", ".....", "..#.."], {"#": INK}),
+    "haha": (["#.#..#..#.#..#.", "#.#.#.#.#.#.#.#", "###.###.###.###", "#.#.#.#.#.#.#.#",
+              "#.#.#.#.#.#.#.#"], {"#": INK}),
+    "spark": ([".#.", "###", ".#."], {"#": GOLD}),
+    "scrap": (["+++", "+c+", "+++"], {"+": IVORY, "c": GREY}),
 }
+# Props he holds or wears, positioned in sprite pixels from the idle pose's top-left.
+PROPS = {
+    "glasses": (["########..########",      # a pixel wider than his head each side
+                 "#......####......#",
+                 "#......#..#......#",
+                 "#......#..#......#",
+                 "########..########"], {"#": INK}),
+    "page": (["+++++c..",
+              "++++++c.",
+              "+cccc+++",
+              "++++++++",
+              "+ccccc++",
+              "++++++++",
+              "+cccc+++",
+              "++++++++",
+              "+ccc++++",
+              "++++++++"], {"+": IVORY, "c": GREY}),
+}
+GLASSES_AT = (3, 1)           # on his eyes
+PAGE_AT = (8, 6)              # held in front of him, below the glasses
+EMOTIONS = ["surprised", "sad", "laugh", "love", "scared", "confused"]
 LADDER_W = 10
 LADDER_PALETTE = {"d": RAIL_DARK, "l": RAIL_LIGHT}
 
@@ -181,6 +213,25 @@ def pose_rows(idle, kind):
         for ex, ey in EYES:
             g[ey][ex] = g[ey][ex + 1] = ink
             g[ey + 1][ex - 1] = g[ey + 1][ex + 2] = ink
+    elif kind in ("read", "read_l", "read_r"):
+        # looking down at a page (and along its lines)
+        clear_eyes()
+        d = {"read": 0, "read_l": -1, "read_r": 1}[kind]
+        for ex, ey in EYES:
+            for dy in (1, 2):
+                g[ey + dy][ex + d] = g[ey + dy][ex + d + 1] = ink
+    elif kind == "surprised":
+        # tall eyes, like Clawd-Jumping's at the top of a leap
+        clear_eyes()
+        for ex, ey in EYES:
+            for dy in (0, 1, 2):
+                g[ey + dy][ex] = g[ey + dy][ex + 1] = ink
+    elif kind == "sad":
+        # eyes slanting down at the outer corners, a little lower
+        clear_eyes()
+        (lx, ly), (rx, ry) = EYES
+        g[ly + 1][lx + 1] = g[ly + 2][lx] = ink
+        g[ry + 1][rx] = g[ry + 2][rx + 1] = ink
     return ["".join(r) for r in g]
 
 
@@ -259,7 +310,8 @@ class Sprites:
         hx, hy = jump["home"]
         idle = [r[hx:hx + self.iw] for r in jump["frames"][0]["rows"][hy:hy + self.ih]]
         self.poses = {k: grid_image(pose_rows(idle, k), palette)
-                      for k in ("idle", "blink", "look_l", "look_r", "happy")}
+                      for k in ("idle", "blink", "look_l", "look_r", "happy",
+                                "read", "read_l", "read_r", "surprised", "sad")}
         left = climb_rows(idle)
         right = ["".join(reversed(r)) for r in left]
         self.anims["climb"] = Anim("climb", {
@@ -269,6 +321,38 @@ class Sprites:
             "size": [self.iw, self.ih + 4], "home": [0, 4],
             "frames": [{"ms": 350, "rows": hang_rows(idle)}]}, palette)
         self.glyphs = {k: grid_image(rows, pal) for k, (rows, pal) in GLYPHS.items()}
+        self.props = {k: grid_image(rows, pal) for k, (rows, pal) in PROPS.items()}
+        self.props["cloud"], self.cloud_at = cloud_platform(data, palette)
+
+
+def cloud_platform(data, palette):
+    """The cloud from Clawd-Cloud on its own, so he can sit in it while doing
+    other things. Its two blues make it easy to lift out of a riding frame;
+    the wind streaks trailing behind are left out and the holes his legs left
+    are filled. Returns the image and where it sits relative to the idle pose
+    (bottom on the idle pose's feet line, centred under him)."""
+    cloud = data["animations"]["cloud"]
+    rows = cloud["frames"][cloud["loop"][0]]["rows"]
+    hx, hy = cloud["home"]
+    blues = {k for k, v in data["palette"].items() if v in ("#c5d3e0", "#6a9bcc")}
+    light = next(k for k, v in data["palette"].items() if v == "#c5d3e0")
+    cells = {(x, y): ch for y, row in enumerate(rows) for x, ch in enumerate(row)
+             if ch in blues and x >= hx + 3}
+    x0, x1 = min(x for x, _ in cells), max(x for x, _ in cells)
+    y0, y1 = min(y for _, y in cells), max(y for _, y in cells)
+    grid = [["."] * (x1 - x0 + 1) for _ in range(y1 - y0 + 1)]
+    for (x, y), ch in cells.items():
+        grid[y - y0][x - x0] = ch
+    for x in range(x1 - x0 + 1):              # fill the holes under the top of each column
+        col = [grid[y][x] for y in range(len(grid))]
+        if any(c != "." for c in col):
+            top = next(y for y, c in enumerate(col) if c != ".")
+            for y in range(top, len(grid)):
+                if grid[y][x] == ".":
+                    grid[y][x] = light
+    img = grid_image(["".join(r) for r in grid], palette)
+    iw, ih = data["idle_size"]
+    return img, ((iw - img.width()) // 2, ih - img.height())
 
 
 def load_sprites(path=SPRITES):
@@ -544,7 +628,7 @@ def _extra(cell, container):
 
 
 def plasma_desktop_icons(config=PLASMA_CONFIG, desktop=None, screens=None):
-    """[(file name, QRect of the icon image)] for icons on Plasma's desktop.
+    """[(file name, QRect of the icon image, is a folder)] for Plasma's desktop icons.
 
     `screens` are QRects (or (geometry, usable area) pairs); a folder view's
     saved positions are keyed by the resolution of the screen it belongs to.
@@ -600,7 +684,8 @@ def plasma_desktop_icons(config=PLASMA_CONFIG, desktop=None, screens=None):
                 except ValueError:
                     continue
                 icons.append((fname, QRect(area.left() + col * cell_w + (cell_w - size) // 2,
-                                           area.top() + row * cell_h + 2 * SMALL_SPACING, size, size)))
+                                           area.top() + row * cell_h + 2 * SMALL_SPACING, size, size),
+                              os.path.isdir(os.path.join(desktop, fname))))
     return icons
 
 
@@ -691,7 +776,10 @@ class ClawdPet(QWidget):
         self.offscreen = False         # lurking: allowed past the screen edge
         self.scripted = False          # leaping or climbing: the behaviour moves him, not physics
         self.pad = (0, 0)              # how far the current prop sticks out, in pixels
-        self.particles = []            # Z's, hearts, the "!" bubble
+        self.particles = []            # Z's, hearts, the "!" bubble, tears...
+        self.lift = 0                  # sprite px he's drawn above his feet line (sitting in his cloud)
+        self.layers = {}               # props he holds or wears: name -> (x, y) in sprite px from home
+        self.front = None              # the cloud he sits in, drawn over his legs
         self.frame = ("pose", "idle", False)
         self.action = None
         self.script = None
@@ -889,6 +977,8 @@ class ClawdPet(QWidget):
     # ── Driving behaviours ────────────────────────────────────────
 
     def start(self, action, **kw):
+        self._leave_cloud()                     # interrupted mid-scene: drop the props
+        self.layers = {}
         self.vx = 0.0 if not self.airborne else self.vx
         self.pad = (0, 0)
         self.offscreen = False
@@ -923,6 +1013,8 @@ class ClawdPet(QWidget):
             weights["lurk"] = 0
         if self._icons_here():
             weights["visit"] = 6
+        if self._folders_here():
+            weights["read"] = 5
         if self._seam("up") is not None:
             weights["climb"] = 18        # otherwise he'd pile up on the lower screen
             weights["leap"] = 6
@@ -1042,7 +1134,7 @@ class ClawdPet(QWidget):
             if msg.get("cmd") == "play" and msg.get("action") in PLAYABLE:
                 self.start(msg["action"])
             elif msg.get("cmd") == "icons":
-                icons = [[n, r.x(), r.y(), r.width(), r.height()] for n, r in self.icon_source()]
+                icons = [[n, r.x(), r.y(), r.width(), r.height(), d] for n, r, d in self.icon_source()]
                 conn.write((json.dumps(icons) + "\n").encode())
                 conn.flush()
             elif msg.get("cmd") == "status":
@@ -1097,7 +1189,7 @@ class ClawdPet(QWidget):
     def _react(self):
         """Switch to what Claude Code needs now, unless he's in the middle of something physical."""
         if (self.dragging or self.airborne or self.scripted
-                or self.action in ("held", "fall", "climb", "leap", "visit")):
+                or self.action in ("held", "fall", "climb", "leap", "visit", "read")):
             return                                  # _next() catches up when he's back on his feet
         mode = self.claude_mode()
         if mode == "attention" and self.action != "attention":
@@ -1188,9 +1280,9 @@ class ClawdPet(QWidget):
     def pose(self, name):
         self.frame = ("pose", name, False)
 
-    def _emit(self, kind, x, y, vx=0.0, vy=0.0, life=3000.0):
+    def _emit(self, kind, x, y, vx=0.0, vy=0.0, life=3000.0, g=0.0):
         self.particles.append({"kind": kind, "x": x, "y": y, "y0": y, "age": 0.0,
-                               "life": life, "vx": vx, "vy": vy})
+                               "life": life, "vx": vx, "vy": vy, "g": g})
 
     def _bubble(self, on):
         self.particles = [q for q in self.particles if q["kind"] != "bubble"]
@@ -1203,6 +1295,7 @@ class ClawdPet(QWidget):
             if q["kind"] == "bubble":
                 q["y"] = q["y0"] - (q["age"] // 400) % 2      # a gentle bob
             else:
+                q["vy"] += q.get("g", 0.0) * dt / 1000
                 q["x"] += q["vx"] * dt / 1000
                 q["y"] += q["vy"] * dt / 1000
         self.particles = [q for q in self.particles if q["age"] < q["life"]]
@@ -1226,9 +1319,23 @@ class ClawdPet(QWidget):
         return pm
 
     def _frame_pos(self, key):
+        lifted = QPoint(0, self.lift * self.scale)
         if key[0] == "anim":
-            return self.frame_rect(self.sp.anims[key[1]], key[2], key[3]).topLeft()
-        return self.home_px
+            return self.frame_rect(self.sp.anims[key[1]], key[2], key[3]).topLeft() - lifted
+        return self.home_px - lifted
+
+    def _prop_rect(self, img, x, y):
+        s = self.scale
+        return QRect(self.home_px.x() + int(round(x)) * s, self.home_px.y() + int(round(y)) * s,
+                     img.width() * s, img.height() * s)
+
+    def _extras(self):
+        """Props, then the cloud in front of him, as (image, rect)."""
+        out = [(self.sp.props[n], self._prop_rect(self.sp.props[n], x, y)) for n, (x, y) in self.layers.items()]
+        if self.front is not None:
+            cloud = self.sp.props["cloud"]
+            out.append((cloud, self._prop_rect(cloud, *self.front)))
+        return out
 
     def _glyph_rect(self, q):
         s = self.scale
@@ -1238,15 +1345,18 @@ class ClawdPet(QWidget):
 
     def _refresh(self):
         """Repaint (and re-shape the window) only when something visible changed."""
-        state = (self.frame, tuple((q["kind"], int(q["x"]), int(q["y"]), self._fade(q))
-                                   for q in self.particles))
+        extras = self._extras()
+        state = (self.frame, self.lift, tuple((r.x(), r.y(), r.width()) for _, r in extras),
+                 tuple((q["kind"], int(q["x"]), int(q["y"]), self._fade(q)) for q in self.particles))
         if state == self._shown:
             return
-        mask = self._masks.get(self.frame)
+        mask = self._masks.get((self.frame, self.lift))
         if mask is None:
             bitmap = QBitmap.fromImage(self._pixmap(self.frame).toImage().createAlphaMask())
             mask = QRegion(bitmap).translated(self._frame_pos(self.frame))
-            self._masks[self.frame] = mask
+            self._masks[(self.frame, self.lift)] = mask
+        for _, r in extras:
+            mask = mask.united(r)
         for q in self.particles:
             mask = mask.united(self._glyph_rect(q))
         if mask.isEmpty():
@@ -1262,6 +1372,8 @@ class ClawdPet(QWidget):
 
     def paint(self, p):
         p.drawPixmap(self._frame_pos(self.frame), self._pixmap(self.frame))
+        for img, r in self._extras():
+            p.drawImage(r, img)
         for q in self.particles:
             p.setOpacity(self._fade(q))
             p.drawImage(self._glyph_rect(q), self.sp.glyphs[q["kind"]])
@@ -1657,7 +1769,11 @@ class ClawdPet(QWidget):
 
     def _icons_here(self):
         geo = self.screen_geometry()
-        return [(n, r) for n, r in self.icon_source() if geo.contains(r.center())]
+        return [(n, r) for n, r, _ in self.icon_source() if geo.contains(r.center())]
+
+    def _folders_here(self):
+        geo = self.screen_geometry()
+        return [(n, r) for n, r, is_dir in self.icon_source() if is_dir and geo.contains(r.center())]
 
     def _act_visit(self, hang=None):
         """Ride the cloud up to a desktop icon, stand on it (if there's room
@@ -1695,8 +1811,9 @@ class ClawdPet(QWidget):
         self.vx, self.vy = random.uniform(-10, 10) * s, (0.0 if hang else -15.0 * s)
         yield from self._fall()
 
-    def _cloud_up(self, target_y):
-        """Hop on the official cloud, rise to `target_y`, hop off (it flies away)."""
+    def _cloud_up(self, target_y, hop_off=True):
+        """Hop on the official cloud, rise to `target_y`, and hop off (it flies
+        away) or stay aboard, hovering."""
         a = self.sp.anims["cloud"]
         yield from self._play("cloud", range(0, a.loop[0]))
         self.scripted = True
@@ -1707,8 +1824,145 @@ class ClawdPet(QWidget):
                 self.y = max(target_y, self.y - CLOUD_RISE * self.scale * TICK_MS / 1000)
                 yield TICK_MS
         self.y = target_y
-        c, d = a.outro
-        yield from self._play("cloud", range(c, d + 1))
+        if hop_off:
+            c, d = a.outro
+            yield from self._play("cloud", range(c, d + 1))
+
+    def _leave_cloud(self):
+        """Stop sitting in the cloud without moving on screen."""
+        if self.lift:
+            self.y -= self.lift * self.scale
+            self.lift = 0
+        self.front = None
+
+    def _move_layer(self, name, a, b, steps, ms):
+        for k in range(steps + 1):
+            t = k / steps
+            self.layers[name] = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+            yield ms
+
+    def _act_read(self):
+        """Float up on the cloud under a desktop folder, rummage in it, pull out
+        a page, put on reading glasses and read it like a story (with all the
+        feelings), then put everything back and hop off."""
+        folders = self._folders_here()
+        if not folders:
+            return
+        _, icon = random.choice(folders)
+        s = self.scale
+        geo = self.screen_geometry()
+        fcx = icon.center().x()
+        mirror = fcx - 18 * s < geo.left() + s          # reach with the left hand near the left edge
+        hand = 6 if mirror else 18                       # Clawd-Waving's raised hand, in sprite px
+        box_left = fcx - hand * s
+        # sitting up in his cloud, with that hand 3 px up inside the folder
+        home_top = icon.top() + icon.height() + (CLOUD_LIFT + 4 - 3) * s
+        yield from self._walk_to(box_left)
+        if abs(self.box_span()[0] - box_left) > 4 * s:
+            return
+        yield from self._cloud_up(home_top - self.home_px.y(), hop_off=False)
+        self.lift, self.front = CLOUD_LIFT, self.sp.cloud_at
+        self.pose("idle")
+        yield 400
+        lift = self.lift
+        # rummage: hand in the folder, scraps of paper flying out
+        folder_x = (fcx - self.box_span()[0]) / s
+        folder_y = (icon.top() + icon.height() - self.y - self.home_px.y()) / s
+        for k in range(10):
+            self.show_frame("wave", 4 + k % 2, mirror)
+            if k % 2 == 0:
+                self._emit("scrap", folder_x - 1 + random.uniform(-4, 4), folder_y - 2,
+                           vx=random.uniform(-8, 8), vy=random.uniform(-14, -6), g=30, life=1600)
+            yield 150
+        # pull out a page and bring it down in front of him
+        hand_xy = (hand - 4, -lift - 7)
+        page_xy = (PAGE_AT[0], PAGE_AT[1] - lift)
+        yield from self._move_layer("page", hand_xy, page_xy, 6, 70)
+        self.pose("idle")
+        yield 300
+        # reading glasses, from out of nowhere onto his nose
+        aside = (-12 if mirror else 18, 3 - lift)
+        on_nose = (GLASSES_AT[0], GLASSES_AT[1] - lift)
+        yield from self._move_layer("glasses", aside, on_nose, 5, 60)
+        # the story
+        for feeling in random.sample(EMOTIONS, random.randint(3, 4)):
+            yield from self._scan(random.uniform(1200, 2400))
+            yield from self._feel(feeling)
+        yield from self._scan(800)
+        # glasses away, page back into the folder
+        self.pose("idle")
+        yield from self._move_layer("glasses", on_nose, aside, 5, 50)
+        del self.layers["glasses"]
+        self.show_frame("wave", 4, mirror)
+        yield from self._move_layer("page", page_xy, hand_xy, 6, 70)
+        del self.layers["page"]
+        for k in range(3):
+            self.show_frame("wave", 4 + k % 2, mirror)
+            yield 150
+        self.pose("happy")
+        yield 700
+        # the cloud slips away: a split second of cartoon physics, then down he goes
+        self.show_frame("jump", 2)
+        cx, cy = self.front
+        for k in range(1, 9):
+            self.front = (cx + 3 * k, cy)
+            yield 30
+        self._leave_cloud()
+        self.scripted = False
+        self.airborne, self.vx, self.vy = True, 0.0, 0.0
+        yield from self._fall()
+
+    def _scan(self, ms):
+        """Eyes going along the lines of the page."""
+        t, k = 0.0, 0
+        while t < ms:
+            self.pose(("read_l", "read_r")[k % 2])
+            k += 1
+            yield 420
+            t += 420
+
+    def _feel(self, feeling):
+        s, head = self.scale, -self.lift              # his head's top row, in sprite px from home
+        if feeling == "surprised":
+            self.pose("surprised")
+            self._emit("excl", 11, head - 8, vy=-2, life=1400)
+            yield 1400
+        elif feeling == "sad":
+            self.pose("sad")
+            for _ in range(2):
+                self._emit("drop", 5, head + 5, vy=2, g=40, life=1100)
+                yield 650
+            yield 300
+        elif feeling == "laugh":
+            self.pose("happy")
+            self._emit("haha", 4, head - 8, vy=-3, life=1500)
+            base = self.x
+            for k in range(12):
+                self.x = base + (s if k % 2 else -s)
+                yield 90
+            self.x = base
+        elif feeling == "love":
+            self.pose("happy")
+            for _ in range(3):
+                self._emit("heart", 9 + random.uniform(-4, 4), head - 3,
+                           vx=random.uniform(-1, 1), vy=-4, life=1400)
+                yield 380
+        elif feeling == "scared":
+            self.pose("surprised")
+            self._emit("drop", 21, head + 1, vy=1, g=20, life=1200)
+            base = self.x
+            for k in range(14):
+                self.x = base + (s if k % 2 else 0)
+                yield 60
+            self.x = base
+        elif feeling == "confused":
+            self.pose("read")
+            self._emit("question", 12, head - 8, vy=-1.5, life=1500)
+            yield 700
+            self.pose("look_l")
+            yield 400
+            self.pose("look_r")
+            yield 400
 
     def _perch(self, duration):
         """Standing on an icon: blinking, looking about, watching the pointer."""

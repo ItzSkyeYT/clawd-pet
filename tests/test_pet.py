@@ -504,7 +504,8 @@ class DesktopIcons(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.desktop = os.path.join(self.tmp, "Desktop")
         os.makedirs(self.desktop)
-        for name in ("Old Firefox Data", "steam.desktop", "com.blackmagicdesign.resolve.desktop"):
+        os.makedirs(os.path.join(self.desktop, "Old Firefox Data"))
+        for name in ("steam.desktop", "com.blackmagicdesign.resolve.desktop"):
             open(os.path.join(self.desktop, name), "w").close()
         self.config = os.path.join(self.tmp, "appletsrc")
         with open(self.config, "w") as f:
@@ -516,7 +517,9 @@ class DesktopIcons(unittest.TestCase):
 
     def test_icons_come_from_plasmas_grid(self):
         icons = cp.plasma_desktop_icons(self.config, self.desktop, [self.LAPTOP])
-        rects = {name: r for name, r in icons}
+        rects = {name: r for name, r, _ in icons}
+        folders = {name for name, _, is_dir in icons if is_dir}
+        self.assertEqual(folders, {"Old Firefox Data"})
         # 17 columns of 112px and rows of 120px fill the 1920x1200 screen; the
         # 64px icon is centred in its cell, 8px down
         self.assertEqual(rects["Old Firefox Data"], QRect(24, 338, 64, 64))
@@ -529,7 +532,7 @@ class DesktopIcons(unittest.TestCase):
 
     def visit(self, hang, icon=QRect(136, 578, 64, 64)):
         pet = cp.ClawdPet(cp.load_sprites(), settings=None)
-        pet.icon_source = lambda: [("DaVinci", icon)]
+        pet.icon_source = lambda: [("DaVinci", icon, False)]
         pet.set_box_left(400)
         pet.y = pet.ground_y()
         pet.start("visit", hang=hang)
@@ -561,6 +564,46 @@ class DesktopIcons(unittest.TestCase):
     def test_he_hangs_off_an_icon_and_drops(self):
         perched, hanging = self.visit(hang=True)
         self.assertTrue(perched and hanging)
+
+    def test_he_reads_a_story_from_a_folder(self):
+        pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        folder = QRect(24, 338, 64, 64)                    # top-left corner, like the real one
+        pet.icon_source = lambda: [("Old Firefox Data", folder, True),
+                                   ("steam.desktop", QRect(24, 578, 64, 64), False)]
+        pet.set_box_left(600)
+        pet.y = pet.ground_y()
+        pet.start("read")
+        props, faces, glyphs, reached = set(), set(), set(), False
+        for _ in range(int(150_000 / 16)):
+            pet.advance(16)
+            props |= set(pet.layers)
+            glyphs |= {q["kind"] for q in pet.particles}
+            if pet.frame[0] == "pose":
+                faces.add(pet.frame[1])
+            if pet.frame[:2] == ("anim", "wave") and pet.front is not None:
+                hand = pet.frame_rect(pet.sp.anims["wave"], pet.frame[2], pet.frame[3])
+                top = pet.y + hand.top() - pet.lift * pet.scale + pet.scale      # the raised hand
+                reached = reached or folder.top() <= top < folder.bottom()
+            self.assertGreaterEqual(pet.box_span()[0], 0, "off the left edge of the screen")
+            if pet.action == "idle":
+                break
+        self.assertEqual(pet.action, "idle")
+        self.assertTrue(reached, "never reached into the folder")
+        self.assertEqual(props, {"page", "glasses"})
+        self.assertIn("scrap", glyphs)
+        self.assertTrue(faces & {"read_l", "read_r"})
+        self.assertGreaterEqual(len(faces & {"surprised", "sad", "happy", "read", "look_l"}), 2)
+        self.assertEqual((pet.layers, pet.front, pet.lift), ({}, None, 0))  # all tidied away
+        self.assertAlmostEqual(pet._feet(), 1530, delta=1)
+
+    def test_only_folders_get_read(self):
+        pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        pet.icon_source = lambda: [("steam.desktop", QRect(24, 578, 64, 64), False)]
+        pet.set_box_left(600)
+        pet.y = pet.ground_y()
+        self.assertNotIn("read", [pet._pick_action() for _ in range(300)])
+        pet.icon_source = lambda: [("Old Firefox Data", QRect(24, 338, 64, 64), True)]
+        self.assertIn("read", [pet._pick_action() for _ in range(300)])
 
     def test_top_row_icons_have_no_room_on_top_so_he_hangs(self):
         perched, hanging = self.visit(hang=False, icon=QRect(136, 338, 64, 64))

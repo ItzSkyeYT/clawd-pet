@@ -15,6 +15,7 @@
 - [x] Watches the pointer, glances at it; stroke him for hearts and a dance
 - [x] Ladder between screens of different heights (up and down)
 - [x] Visits desktop icons: cloud ride up, stands on them, hangs off them
+- [x] Reads a page from a desktop folder with glasses on, reacting to the story
 - [x] Tests (`python -m unittest discover -s tests -v`)
 
 ## Possible Improvements

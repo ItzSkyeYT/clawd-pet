@@ -34,6 +34,9 @@ python tools/install_hooks.py --remove   # takes them out again
 - He roams between monitors: walks off a taller screen and drops, climbs a ladder up or
   down, sometimes leaps; he visits desktop icons (rides his cloud up, stands on them,
   hangs off them)
+- Desktop **folders**: he floats up on his cloud under one, rummages (paper scraps fly),
+  pulls out a page, puts on reading glasses and reads it like a story, reacting as he
+  goes (surprised, teary, laughing, in love, scared, confused), then puts it all back
 - Tray icon: click to hide/show
 
 ## Layout
@@ -55,6 +58,9 @@ python tools/install_hooks.py --remove   # takes them out again
 - Climbing and hanging poses (`climb_rows`, `hang_rows`) are built from official parts:
   the idle body plus the arms Clawd-Jumping raises. The ladder, hearts, "!" bubble and
   Z's use the official palette
+- Scenes can layer extras over the base frame: `lift` (sitting up in his cloud),
+  `layers` (props like the glasses and page, `PROPS`) and `front` (the cloud, lifted out
+  of Clawd-Cloud by its two blues in `cloud_platform()`, drawn over his legs)
 - Scale is screen pixels per cell (Small 3, Medium 4, Large 6, Huge 8), saved in QSettings
 
 ## Palette (traced, shared by all animations)
