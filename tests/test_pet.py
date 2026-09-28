@@ -1494,6 +1494,19 @@ class Reminders(unittest.TestCase):
         click(self.pet)
         self.assertEqual(self.launched, ["continue"])               # back to normal
 
+    def test_one_reminder_at_a_time(self):
+        self.water_due()
+        self.pet._streak_at = self.pet.now - 61 * 60_000            # a break is due too
+        run_ms(self.pet, 1100)
+        self.assertEqual(self.pet.action, "remind_water")
+        click(self.pet)
+        self.assertTrue(run_ms(self.pet, 8000, until=lambda: self.pet.action != "drink"))
+        run_ms(self.pet, 2000)
+        self.assertNotEqual(self.pet.action, "remind_break")        # not straight after
+        self.pet.now += 5 * 60_000
+        self.pet._input_at = self.pet.now
+        self.assertEqual(self.pet._due_reminder(), "remind_break")
+
     def test_ignored_it_comes_back_later(self):
         self.water_due()
         run_ms(self.pet, 1100)

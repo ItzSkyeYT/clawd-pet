@@ -2899,8 +2899,10 @@ class ClawdPet(QWidget):
     def acknowledge(self):
         """You clicked him mid-reminder: seen it. He has a drink, or a coffee break with you."""
         kind = "water" if self.action == "remind_water" else "break"
+        other = "break" if kind == "water" else "water"
         self._ignores[kind] = 0
         self._snooze[kind] = 0.0
+        self._snooze[other] = max(self._snooze[other], self.now + 5 * 60_000)   # one at a time
         if kind == "water":
             self._water_at = self.now
             self.start("drink", manual=True)
@@ -2984,7 +2986,7 @@ class ClawdPet(QWidget):
             yield from self._stretch(1100)
             self.pose(self._glance())
             yield 1400
-            yield from self._play("wave", range(len(self.sp.anims["wave"].frames)))
+            yield from self._once("wave")
             self.pose("idle")
             yield 1600
         self._bubble(False)
