@@ -87,7 +87,12 @@ to what Claude Code is doing.
   goes (surprised, teary, laughing, in love, scared, confused), then puts it all back
 - He walks on windows: hops up onto a window's top edge or climbs its side hand over hand
   and pulls himself up, leaps across gaps from one window top to the next, rides a window
-  when you move it (even mid-climb), hops or climbs down again; ducks out of sight while something is fullscreen on his screen
+  when you move it (even mid-climb), climbs down again or walks to the brink and hops off;
+  ducks out of sight while something is fullscreen on his screen
+- **Coming down from high up** (off a window or an icon, or after reading on his cloud):
+  from 30 cells up he floats down under an umbrella or a parachute, swaying, and lands
+  softly; from 70 up it's often a skydive first, spread-eagled, before he pulls the cord
+  (the pack pops, then the canopy opens). A quarter of the time it's a plain drop
 - **A new wallpaper** makes him jump: he glances about, turns round to look (from behind
   he has no eyes), whips back with a "!" and jumps. Plasma slideshows change on the clock
   (whole multiples of the interval, 15 min by default), so he's ready for each one; a
@@ -98,18 +103,26 @@ to what Claude Code is doing.
   December, a party hat with confetti at New Year (and a dance at midnight), a pumpkin
   with bats in the week before Halloween
 - **Your birthday** (Settings → Time and seasons): the first time he sees you that day he
-  notices the date, puffs up to double size, jumps about in confetti with HAPPY BIRTHDAY
-  popping up above him and balloons rising, brings out a cake, makes a wish, blows out the
-  candles, dances and shrinks back. Once a day (remembered across restarts), and the
+  notices the date, puffs up to double size, jumps about in confetti with HAPPY BIRTHDAY!
+  popping up above him in rainbow letters and balloons rising on either side, holds up a
+  cake with the candles flickering between his eyes (a present at his feet), makes a wish
+  with his eyes shut, blows them out (smoke curls up from the wicks), dances and shrinks back. Once a day (remembered across restarts), and the
   party hat stays on all day, whatever else is set. Play → "Birthday party" previews it
 - **Hats**, strongest first: your birthday's party hat; the party hat at any celebration
   (Claude Code finishing a job, New Year, the birthday party); a hat you picked; New
   Year's party hat; the nightcap all night; the season's. They stay on while he hangs
-  off the pointer, and go round with him when he's spun
-- **Reminders**: water every 45 min (he runs over to you, hops up and down waving a bottle,
-  then holds it out) and a break after 60 min at it (a look, a wave, a hop). A bubble and
-  a green **Done** button stay up until you press the button: through being dragged or
-  thrown, fullscreen, a permission request and even a restart (QSettings `reminding`).
+  off the pointer, and go round with him when he's spun. A change of hat is animated: the
+  old one lifts off and fades, the new one drops on, bounces and sparkles
+- **Reminders**: water every 45 min and a break after 60 min at it. He goes to the middle
+  of the screen you're working on (your active window's, else the pointer's) the way he
+  gets about anyway: down off a window, along the floor, up or down the ladder to the
+  other screen (the bottle put away for the climb). There he hops about waving the bottle
+  and holds it out; for a break, a look, a wave, a hop. A bubble and a green **Done**
+  button stay up until you press the button: through being dragged or thrown,
+  fullscreen, a permission request and even a restart (QSettings `reminding`). They
+  always stay on a screen, following him: over his right shoulder, over his left at a
+  right edge or in the dead corner under a taller screen, lower down beside him when he's
+  up against the top.
   Loud for two minutes, then calm. A click on his body only flashes the button. After
   Done he has a drink, or a coffee break with you. New ones don't start while you're away
   (no pointer or prompt for 10 min restarts the count), in quiet mode or in fullscreen
@@ -121,8 +134,13 @@ to what Claude Code is doing.
 - `tools/install_hooks.py`: adds/removes the hooks in `~/.claude/settings.json`
 - `sprites/clawd.json`: traced frames, palette, timings, loop points. Generated, don't hand-edit
 - `sprites/extras.py`: hand-drawn extras on the same grid (hats with anchors, the stretch
-  pose with its head position, mug, steam, bottles, bubbles, bats, confetti, droplets).
-  Plain data, parsed with `ast`, never imported
+  pose with its head position, mug, steam, bottles, bubbles, bats, confetti, droplets,
+  dangling from the pointer, climbing a window side and the ladder, the parachute and
+  umbrella with the cell his fists hold, the skydive). Plain data, parsed with `ast`,
+  never imported
+- `sprites/birthday.py`: the party's art the same way (the cake lit twice to flicker and
+  blown out, with where it's held and where its flames and wicks are, smoke, the puff,
+  balloons, letters with rainbow tints, a present)
 - `tools/fetch_official.py`: downloads the official Clawd GIFs from claude.ai into `assets/official/`
 - `tools/trace_official.py`: turns them into `sprites/clawd.json` and reports fidelity
 - `tests/test_pet.py`: `python -m unittest discover -s tests -v` (offscreen, no window appears)

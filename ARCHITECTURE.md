@@ -105,7 +105,20 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
   the edge and `_arc_to()`s across, the arc higher for a wider gap
 - `_climb_side()` moves him hand over hand beside the edge (scripted), following the
   window if it moves and falling if it goes; up top he hops in over the edge (`_arc_to`),
-  going down he stops at the floor below or lets go at the bottom of the side
+  going down he stops at the floor below or lets go at the bottom of the side. The side
+  and ladder climbs cycle through however many frames the art has (four now, played
+  backwards going down)
+
+## Coming down softly
+- `_come_down(vx, vy)` replaces the plain drop off a window (`_act_hop_down`, after
+  walking to the brink), an icon visit and the reading cloud: `_drop_below()` measures
+  what he'd land on; under `FLOAT_FROM` cells (or a quarter of the time) it's `_fall()`,
+  else `_float_down()`, with the parachute (and maybe a skydive first) from `SKYDIVE_FROM`
+- `_float_down()` waits until he's over the top of the hop and clear of the edge, then
+  sets `chute`: `_physics_step` pulls his fall speed to `CHUTE_FALL` (hard, as the canopy
+  catches the air), damps his drift, sways him (`CHUTE_SWAY`) and never bounces. The
+  canopy is a layer placed by `_held_at()` so the art's `anchor` cell sits in the dangle
+  frame's fists. `start()` packs it away if anything interrupts
 
 ## The wallpaper
 - `plasma_wallpapers()` reads Plasma's desktop config: each containment's wallpaper
@@ -150,7 +163,13 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
 - The birthday: `is_birthday()` (29 February kept on the 28th in other years),
   `_birthday_due()` (once a day, remembered in QSettings `birthday_done`, when you're
   there), `_act_birthday()`. He grows with `_resize_in_place()` about his middle; the size
-  you chose is kept in `_true_scale` so `save()` never stores the party size
+  you chose is kept in `_true_scale` so `save()` never stores the party size. The art is
+  `sprites/birthday.py` (`BIRTHDAY`, loaded like extras): the cake's `hold` cell goes on
+  his bottom middle so it's held up in front with the flames between his eyes (a test
+  checks his eyes stay clear); smoke rises from each wick in step. Balloons start either
+  side of him with their strings off the floor and fade out before the window's top
+- A hat change is animated (`_work_out_hat()`, `HAT_SWAP`): the old hat lifts off and
+  fades, the new one drops on, bounces and sparkles; `settle_hat()` skips it (at start)
 - Night (`night_from` to `night_to`, minutes after midnight, 22:00-06:00 by default, may
   or may not cross midnight): sleepy rests, yawns, naps weighted up, lively scenes down.
   Morning (`night_to` to `morning_to`, until 11:00): `_act_morning` once a day, when you're there
@@ -170,6 +189,16 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
 - The bubble sits at `BUBBLE_AT`, the button at `DONE_AT`: clear of hats (they droop left),
   the raised and the side-held bottle, and every pose he takes in a reminder (a test checks
   the button against his pixels and props)
+- `_place_reminder_bits()` runs every tick while one is pending and keeps both wholly on a
+  screen (`screen_areas()`), trying `REMINDER_SPOTS` in order: over his right shoulder,
+  over his left, lower on his left with the button beside the bubble. A spot that still
+  fits is kept; back to the right only with `SPOT_SLACK` cells to spare, so it can't
+  flicker at an edge. Off-screen parts of the desktop (the corner under a taller screen)
+  count as off
+- `_go_to_focus()`: to the middle of `_focus_area()` (the active window's screen, else the
+  pointer's), off a window with a hop, then screen by screen: `_act_climb(side)` where
+  the floors step (the ladder, up or down; whatever he holds is put away for the climb),
+  walking where they meet; one big `_arc_to()` only where no ladder can reach
 
 ## His settings, open
 - `open_settings()` starts the manual `settings` scene (Claude Code and reminders wait).

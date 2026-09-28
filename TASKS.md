@@ -23,7 +23,12 @@
 - [x] Settings panel and quiet mode
 - [x] Hats (Santa, pumpkin, party, nightcap), night and morning routines, New Year
       confetti, Halloween bats
-- [x] Water and break reminders, acknowledged with a click
+- [x] Water and break reminders, acknowledged with a click; they stay up until Done, on
+      screen, and he takes the ladder to the screen you're working on
+- [x] Grabs the pointer and dangles from it; spin him round it
+- [x] Climbs window sides, jumps between windows, floats down under an umbrella or a
+      parachute (skydiving first from high up)
+- [x] Startled by a new wallpaper; a birthday party with a cake, balloons and a banner
 - [x] Tests (`python -m unittest discover -s tests -v`)
 
 ## Possible Improvements
