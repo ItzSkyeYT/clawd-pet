@@ -308,7 +308,11 @@ class ClawdPet(QWidget):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.WindowStaysOnTopHint
                             | Qt.WindowType.Tool
-                            | Qt.WindowType.WindowDoesNotAcceptFocus)   # never steal your typing
+                            | Qt.WindowType.WindowDoesNotAcceptFocus    # never steal your typing
+                            # Unmanaged, like a tooltip. KWin otherwise keeps X11 windows
+                            # inside X11's single work area, which on a taller second
+                            # monitor pinned him hundreds of pixels above its floor.
+                            | Qt.WindowType.X11BypassWindowManagerHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setWindowTitle("Clawd")
