@@ -72,7 +72,7 @@ LABELS = {
     "dance": "Dance", "laptop": "Laptop", "sparkler": "Sparkler",
     "cloud": "Ride the cloud", "race": "Go karting", "lurk": "Peek from the edge",
     "sleep": "Nap", "climb": "Climb to the other screen", "leap": "Leap to the other screen",
-    "visit": "Visit a desktop icon", "read": "Read something from a desktop folder",
+    "visit": "Check out a desktop icon", "read": "Read something from a desktop folder",
     "work": "Typing (Claude Code working)", "attention": "Calling you over (a permission)",
     "celebrate": "Celebrating (Claude Code done)",
 }
@@ -134,7 +134,19 @@ PROPS = {
               "++++++++",
               "+ccc++++",
               "++++++++"], {"+": IVORY, "c": GREY}),
+    "magnifier": (["..####....",
+                   ".#....#...",
+                   "#.++...#..",
+                   "#.+....#..",
+                   "#......#..",
+                   "#......#..",
+                   ".#....#...",
+                   "..####h...",
+                   "......hh..",
+                   ".......hh.",
+                   "........hh"], {"#": INK, "+": IVORY, "h": RAIL_DARK}),
 }
+MAGNIFIER_LENS = (3.5, 3.5)   # the middle of the magnifying glass's lens, in its own pixels
 GLASSES_AT = (3, 1)           # on his eyes
 PAGE_AT = (8, 6)              # held in front of him, below the glasses
 EMOTIONS = ["surprised", "sad", "laugh", "love", "scared", "confused"]
@@ -289,6 +301,16 @@ def typing_eyes(rows, kind, body, ink):
     return ["".join(r) for r in g]
 
 
+def poke_rows(idle):
+    """Poking with the right arm stretched out: 3 px further, a pixel thinner."""
+    body = idle[0][4]
+    rows = [list(r) + ["."] * 3 for r in idle]
+    for y in (5, 6):
+        for x in range(len(idle[0]), len(idle[0]) + 3):
+            rows[y][x] = body
+    return ["".join(r) for r in rows]
+
+
 def hang_rows(idle):
     """Hanging by both hands: the idle body with both arms raised the way
     Clawd-Jumping raises them."""
@@ -361,6 +383,9 @@ class Sprites:
                 "size": laptop["size"], "home": laptop["home"], "loop": [0, len(typing) - 1],
                 "frames": [{"ms": f["ms"], "rows": typing_eyes(f["rows"], kind, body, ink)} for f in typing]},
                 palette)
+        self.anims["poke"] = Anim("poke", {
+            "size": [self.iw + 3, self.ih], "home": [0, 0],
+            "frames": [{"ms": 180, "rows": poke_rows(idle)}]}, palette)
         self.anims["hang"] = Anim("hang", {
             "size": [self.iw, self.ih + 4], "home": [0, 4],
             "frames": [{"ms": 350, "rows": hang_rows(idle)}]}, palette)
@@ -965,6 +990,10 @@ class ClawdPet(QWidget):
             top = max(top, hy)
             bottom = max(bottom, a.h - hy)
         s = self.scale
+        # Room beside him for an icon he's inspecting and the magnifying glass
+        # going over it (the window is click-through outside what's drawn).
+        stage = -(-64 // s) + 12
+        left, right = max(left, stage), max(right, self.iw + stage)
         self.setFixedSize((left + right) * s, (top + bottom) * s)
         self.home_px = QPoint(left * s, top * s)      # idle pose's top-left in the window
 
@@ -1979,9 +2008,10 @@ class ClawdPet(QWidget):
         geo = self.screen_geometry()
         return [(n, r) for n, r, is_dir in self.icon_source() if is_dir and geo.contains(r.center())]
 
-    def _act_visit(self, hang=None):
-        """Ride the cloud up to a desktop icon, stand on it (if there's room
-        above it) and maybe hang off its side, then drop back down."""
+    def _act_visit(self, hang=None, stay=None):
+        """Float up beside a desktop icon and check it out properly: puzzle over
+        it, lean in, poke it, go over it with a magnifying glass, make up his
+        mind. Then sometimes hop onto it (or hang off it), else drop down."""
         icons = self._icons_here()
         if not icons:
             return
@@ -1989,31 +2019,139 @@ class ClawdPet(QWidget):
         s = self.scale
         width = self.iw * s
         geo = self.screen_geometry()
-        stand = icon.top() - geo.top() >= (self.ih + 14) * s     # room for him (and his cloud) on top
+        # beside it, on whichever side has room, eyes level with the icon
+        sides = [side for side, room in ((1, icon.left() - geo.left()),
+                                         (-1, geo.left() + geo.width() - icon.left() - icon.width()))
+                 if room >= width + 4 * s]
+        if not sides:
+            return
+        side = random.choice(sides)                  # +1: the icon is on his right
+        box_left = icon.left() - 3 * s - width if side > 0 else icon.left() + icon.width() + 3 * s
+        home_top = icon.center().y() - 3 * s + CLOUD_LIFT * s
+        yield from self._walk_to(box_left)
+        if abs(self.box_span()[0] - box_left) > 4 * s:
+            return
+        yield from self._cloud_up(home_top - self.home_px.y(), hop_off=False)
+        self.lift, self.front = CLOUD_LIFT, self.sp.cloud_at
+        yield from self._inspect(icon, side)
+        # and then...
+        stand = icon.top() - geo.top() >= (self.ih + 4) * s          # room on top of it
+        stay = random.random() < 0.4 if stay is None else stay
+        if not stay:
+            yield from self._cloud_slips_away()
+            self.scripted = False
+            self.airborne, self.vx, self.vy = True, 0.0, 0.0
+            yield from self._fall()
+            return
         hang = (random.random() < 0.5 if hang is None else hang) or not stand
-        # hang off whichever side has more room, one raised hand on the corner
-        right = geo.left() + geo.width() - (icon.left() + icon.width()) >= icon.left() - geo.left()
-        hang_left = icon.left() + icon.width() - 7 * s if right else icon.left() - 17 * s
-        hang_y = icon.top() + 2 * s - self.home_px.y()           # hands just over the top edge
+        room_r = geo.left() + geo.width() - (icon.left() + icon.width()) >= icon.left() - geo.left()
+        hang_left = icon.left() + icon.width() - 7 * s if room_r else icon.left() - 17 * s
+        hang_feet = icon.top() + 2 * s + self.ih * s                  # hands just over the top edge
+        yield from self._cloud_slips_away()
         if stand:
-            spot, spot_y = icon.center().x() - width / 2, icon.top() - self.home_px.y() - self.ih * s
-        else:
-            spot, spot_y = hang_left, hang_y
-        yield from self._walk_to(spot)
-        if abs(self.box_span()[0] - spot) > 4 * s:
-            return                                               # couldn't get underneath it
-        yield from self._cloud_up(spot_y)
-        if stand:
-            yield from self._perch(random.uniform(5000, 12000))
+            yield from self._arc_to(icon.center().x() - width / 2, icon.top(), 4 * s, hold=True)
+            yield from self._perch(random.uniform(4000, 9000))
             if hang:
                 self.show_frame("jump", 2)
-                yield from self._arc_to(hang_left, hang_y + self.home_px.y() + self.ih * s, 2 * s, hold=True)
+                yield from self._arc_to(hang_left, hang_feet, 2 * s, hold=True)
+        else:
+            yield from self._arc_to(hang_left, hang_feet, 3 * s, hold=True)
         if hang:
-            yield from self._hang(random.uniform(3000, 8000))
-        self.scripted = False                                    # let go
+            yield from self._hang(random.uniform(3000, 7000))
+        self.scripted = False                                         # let go
         self.airborne = True
         self.vx, self.vy = random.uniform(-10, 10) * s, (0.0 if hang else -15.0 * s)
         yield from self._fall()
+
+    def _inspect(self, icon, side):
+        """The investigation, floating beside `icon` (side +1: it's on his right)."""
+        s, head = self.scale, -self.lift
+        toward, away = ("look_r", "look_l") if side > 0 else ("look_l", "look_r")
+        # what's this?
+        self.pose(toward)
+        yield 800
+        self._emit("question", 12, head - 8, vy=-1.5, life=1600)
+        yield 1000
+        # a double take
+        self.pose(away)
+        yield 280
+        self.pose("surprised")
+        self._emit("excl", 11, head - 8, vy=-2, life=1200)
+        yield 900
+        # lean in and poke it
+        base = self.x
+        for _ in range(3):
+            self.x += side * s
+            yield 90
+        self.pose(toward)
+        yield 500
+        tip = self.iw + 2 if side > 0 else -3
+        for _ in range(random.randint(2, 3)):
+            self.show_frame("poke", 0, side < 0)
+            self._emit("spark", tip, head + 4, life=260)
+            yield 180
+            self.pose(toward)
+            yield 280
+        self._emit("question", 12, head - 8, vy=-1.5, life=1400)
+        yield 700
+        for _ in range(3):
+            self.x -= side * s
+            yield 90
+        self.x = base
+        # out comes the magnifying glass, over the icon in a little sweep
+        held = (self.iw - 2 if side > 0 else -6, head + 5)
+
+        def over(fx, fy):
+            px = icon.left() + fx * icon.width()
+            py = icon.top() + fy * icon.height()
+            return ((px - self.x - self.home_px.x()) / s - MAGNIFIER_LENS[0],
+                    (py - self.y - self.home_px.y()) / s - MAGNIFIER_LENS[1])
+        spots = [over(*f) for f in ((0.3, 0.3), (0.72, 0.3), (0.7, 0.72), (0.3, 0.7), (0.5, 0.5))]
+        yield from self._move_layer("magnifier", held, spots[0], 5, 60)
+        at = spots[0]
+        for k, spot in enumerate(spots):
+            yield from self._move_layer("magnifier", at, spot, 4, 70)
+            at = spot
+            self.pose(("surprised", toward, "read_r" if side > 0 else "read_l")[k % 3])
+            if k == 2:
+                self._emit("excl", 11, head - 8, vy=-2, life=900)
+            yield random.uniform(350, 650)
+        # the verdict
+        verdict = random.choice(("like", "puzzled", "spooked"))
+        if verdict == "like":
+            self.pose("happy")
+            for _ in range(2):
+                self._emit("heart", 9 + random.uniform(-4, 4), head - 3, vx=random.uniform(-1, 1),
+                           vy=-4, life=1400)
+                self._emit("spark", at[0] + MAGNIFIER_LENS[0] + random.uniform(-4, 4),
+                           at[1] + MAGNIFIER_LENS[1] + random.uniform(-4, 4), life=500)
+                yield 450
+        elif verdict == "puzzled":
+            for eyes in (away, toward, away, toward):
+                self.pose(eyes)
+                yield 300
+            self._emit("question", 12, head - 8, vy=-1.5, life=1500)
+            yield 900
+        else:                                        # spooked: sweat drop, backs off
+            self.pose("surprised")
+            self._emit("drop", 21 if side < 0 else 1, head + 1, vy=1, g=20, life=1100)
+            for _ in range(4):
+                self.x -= side * s
+                yield 50
+            yield 600
+        yield from self._move_layer("magnifier", at, held, 5, 60)
+        del self.layers["magnifier"]
+        self.pose("idle")
+        yield 300
+
+    def _cloud_slips_away(self):
+        """The cloud slides out from under him: a split second of cartoon physics."""
+        self.show_frame("jump", 2)
+        cx, cy = self.front
+        for k in range(1, 9):
+            self.front = (cx + 3 * k, cy)
+            yield 30
+        self._leave_cloud()
 
     def _cloud_up(self, target_y, hop_off=True):
         """Hop on the official cloud, rise to `target_y`, and hop off (it flies
@@ -2055,12 +2193,16 @@ class ClawdPet(QWidget):
         _, icon = random.choice(folders)
         s = self.scale
         geo = self.screen_geometry()
-        fcx = icon.center().x()
-        mirror = fcx - 18 * s < geo.left() + s          # reach with the left hand near the left edge
+        # Folders open at the top: he floats beside the folder and reaches up
+        # over its rim, with the left hand from its right side if there's room.
+        need = (self.iw + 2) * s
+        mirror = (geo.left() + geo.width() - icon.left() - icon.width() >= need
+                  or icon.left() - geo.left() < need)
         hand = 6 if mirror else 18                       # Clawd-Waving's raised hand, in sprite px
-        box_left = fcx - hand * s
-        # sitting up in his cloud, with that hand 3 px up inside the folder
-        home_top = icon.top() + icon.height() + (CLOUD_LIFT + 4 - 3) * s
+        hand_x = icon.left() + icon.width() - 3 * s if mirror else icon.left() + 3 * s
+        box_left = hand_x - hand * s
+        # sitting up in his cloud, the top of that hand a pixel above the rim
+        home_top = icon.top() + (CLOUD_LIFT + 3) * s
         yield from self._walk_to(box_left)
         if abs(self.box_span()[0] - box_left) > 4 * s:
             return
@@ -2069,17 +2211,16 @@ class ClawdPet(QWidget):
         self.pose("idle")
         yield 400
         lift = self.lift
-        # rummage: hand in the folder, scraps of paper flying out
-        folder_x = (fcx - self.box_span()[0]) / s
-        folder_y = (icon.top() + icon.height() - self.y - self.home_px.y()) / s
+        # rummage: hand in over the rim, scraps of paper flying up out of the top
+        rim = (icon.top() - self.y - self.home_px.y()) / s
         for k in range(10):
             self.show_frame("wave", 4 + k % 2, mirror)
             if k % 2 == 0:
-                self._emit("scrap", folder_x - 1 + random.uniform(-4, 4), folder_y - 2,
-                           vx=random.uniform(-8, 8), vy=random.uniform(-14, -6), g=30, life=1600)
+                self._emit("scrap", hand - 1 + random.uniform(-3, 3), rim - 1,
+                           vx=random.uniform(-7, 7), vy=random.uniform(-16, -8), g=30, life=1600)
             yield 150
-        # pull out a page and bring it down in front of him
-        hand_xy = (hand - 4, -lift - 7)
+        # pull a page up out of the folder and bring it down in front of him
+        hand_xy = (hand - 4, rim - 7)
         page_xy = (PAGE_AT[0], PAGE_AT[1] - lift)
         yield from self._move_layer("page", hand_xy, page_xy, 6, 70)
         self.pose("idle")
@@ -2106,12 +2247,7 @@ class ClawdPet(QWidget):
         self.pose("happy")
         yield 700
         # the cloud slips away: a split second of cartoon physics, then down he goes
-        self.show_frame("jump", 2)
-        cx, cy = self.front
-        for k in range(1, 9):
-            self.front = (cx + 3 * k, cy)
-            yield 30
-        self._leave_cloud()
+        yield from self._cloud_slips_away()
         self.scripted = False
         self.airborne, self.vx, self.vy = True, 0.0, 0.0
         yield from self._fall()

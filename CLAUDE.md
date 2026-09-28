@@ -46,9 +46,12 @@ to what Claude Code is doing.
   working and you're not playing with him; it gives way to Claude Code at once. After
   5 minutes with nothing happening he winds down (longer rests, more naps)
 - He roams between monitors: walks off a taller screen and drops, climbs a ladder up or
-  down, sometimes leaps; he visits desktop icons (rides his cloud up, stands on them,
-  hangs off them)
-- Desktop **folders**: he floats up on his cloud under one, rummages (paper scraps fly),
+  down, sometimes leaps; he checks out desktop icons: floats up beside one on his cloud,
+  puzzles over it ("?", a double take "!"), leans in and pokes it, goes over it with a
+  magnifying glass, makes up his mind (likes it / still puzzled / spooked), and sometimes
+  hops onto it or hangs off it
+- Desktop **folders**: he floats up beside one and reaches over its rim into the top (where
+  folders open), rummages (paper scraps fly up out of it),
   pulls out a page, puts on reading glasses and reads it like a story, reacting as he
   goes (surprised, teary, laughing, in love, scared, confused), then puts it all back
 - Tray icon: click to hide/show

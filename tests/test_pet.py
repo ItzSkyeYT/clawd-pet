@@ -665,12 +665,12 @@ class DesktopIcons(unittest.TestCase):
     def test_no_config_no_icons(self):
         self.assertEqual(cp.plasma_desktop_icons(self.config + ".missing", self.desktop, [self.LAPTOP]), [])
 
-    def visit(self, hang, icon=QRect(136, 578, 64, 64)):
+    def visit(self, hang, icon=QRect(136, 578, 64, 64), stay=True):
         pet = cp.ClawdPet(cp.load_sprites(), settings=None)
         pet.icon_source = lambda: [("DaVinci", icon, False)]
         pet.set_box_left(400)
         pet.y = pet.ground_y()
-        pet.start("visit", hang=hang)
+        pet.start("visit", hang=hang, stay=stay)
         perched = hanging = False
         for _ in range(int(120_000 / 16)):
             pet.advance(16)
@@ -700,6 +700,32 @@ class DesktopIcons(unittest.TestCase):
         perched, hanging = self.visit(hang=True)
         self.assertTrue(perched and hanging)
 
+    def test_he_checks_an_icon_out_properly(self):
+        pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        icon = QRect(248, 698, 64, 64)
+        pet.icon_source = lambda: [("DaVinci", icon, False)]
+        pet.set_box_left(700)
+        pet.y = pet.ground_y()
+        pet.start("visit", stay=False)
+        glyphs, frames, looked = set(), set(), False
+        for _ in range(int(150_000 / 16)):
+            pet.advance(16)
+            glyphs |= {q["kind"] for q in pet.particles}
+            frames.add(pet.frame[1])
+            if "magnifier" in pet.layers:
+                lx, ly = pet.layers["magnifier"]
+                glass = pet._prop_rect(pet.sp.props["magnifier"], lx, ly).translated(int(pet.x), int(pet.y))
+                looked = looked or glass.intersects(icon)
+                self.assertTrue(pet.rect().contains(pet._prop_rect(pet.sp.props["magnifier"], lx, ly)))
+            if pet.action == "idle":
+                break
+        self.assertEqual(pet.action, "idle")
+        self.assertTrue({"question", "excl"} <= glyphs, glyphs)     # puzzled, then surprised
+        self.assertIn("poke", frames)
+        self.assertTrue(looked, "the magnifying glass never went over the icon")
+        self.assertEqual((pet.layers, pet.front, pet.lift), ({}, None, 0))
+        self.assertAlmostEqual(pet._feet(), 1530, delta=1)
+
     def test_he_reads_a_story_from_a_folder(self):
         pet = cp.ClawdPet(cp.load_sprites(), settings=None)
         folder = QRect(24, 338, 64, 64)                    # top-left corner, like the real one
@@ -708,17 +734,21 @@ class DesktopIcons(unittest.TestCase):
         pet.set_box_left(600)
         pet.y = pet.ground_y()
         pet.start("read")
-        props, faces, glyphs, reached = set(), set(), set(), False
+        props, faces, glyphs, reached, first_scrap = set(), set(), set(), False, None
         for _ in range(int(150_000 / 16)):
             pet.advance(16)
             props |= set(pet.layers)
             glyphs |= {q["kind"] for q in pet.particles}
+            scraps = [q for q in pet.particles if q["kind"] == "scrap"]
+            if scraps and first_scrap is None:
+                q = scraps[0]
+                first_scrap = (pet.y + pet.home_px.y() + q["y"] * pet.scale, q["vy"])
             if pet.frame[0] == "pose":
                 faces.add(pet.frame[1])
             if pet.frame[:2] == ("anim", "wave") and pet.front is not None:
                 hand = pet.frame_rect(pet.sp.anims["wave"], pet.frame[2], pet.frame[3])
                 top = pet.y + hand.top() - pet.lift * pet.scale + pet.scale      # the raised hand
-                reached = reached or folder.top() <= top < folder.bottom()
+                reached = reached or top < folder.top() <= top + 3 * pet.scale     # over the rim
             self.assertGreaterEqual(pet.box_span()[0], 0, "off the left edge of the screen")
             if pet.action == "idle":
                 break
@@ -726,6 +756,8 @@ class DesktopIcons(unittest.TestCase):
         self.assertTrue(reached, "never reached into the folder")
         self.assertEqual(props, {"page", "glasses"})
         self.assertIn("scrap", glyphs)
+        self.assertLess(abs(first_scrap[0] - folder.top()), 4 * pet.scale)   # out of the top...
+        self.assertLess(first_scrap[1], 0)                                    # ...flying up
         self.assertTrue(faces & {"read_l", "read_r"})
         self.assertGreaterEqual(len(faces & {"surprised", "sad", "happy", "read", "look_l"}), 2)
         self.assertEqual((pet.layers, pet.front, pet.lift), ({}, None, 0))  # all tidied away
