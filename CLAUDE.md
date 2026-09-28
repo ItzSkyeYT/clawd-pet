@@ -1,39 +1,50 @@
 # Clawd Desktop Pet
 
-Draggable PyQt5 desktop widget — a pixel-perfect Claude mascot.
+Desktop pet of Clawd, the Claude Code mascot (PyQt6). Every animation is traced
+pixel-for-pixel from Anthropic's official Clawd GIFs, so he moves the way he
+does in the Claude apps.
 
 ## Run
 ```bash
-pip install PyQt5
 python claude_pet.py
 ```
+Needs PyQt6 (CachyOS/Arch: `sudo pacman -S python-pyqt6`, elsewhere `pip install PyQt6`).
+On Wayland the app runs itself through XWayland, because a pet has to move its
+own window and Wayland doesn't allow that. Programs it launches get the normal
+environment back.
 
 ## Controls
-- **Left-click**: Open Claude Code
-- **Right-click**: Context menu (claude.ai, force animations, quit)
-- **Drag**: Move Clawd around the desktop
+- **Left-click**: open Claude Code in a terminal ($TERMINAL, else konsole, gnome-terminal, kitty, ...)
+- **Right-click**: menu (Claude Code, claude.ai, play any animation, size, quit)
+- **Drag**: pick him up; let go and he falls to the bottom of the screen (throw him and he bounces)
+- Tray icon: click to hide/show
 
-## Stack
-- Python 3 + PyQt5
-- All graphics are pixel-art sprites rendered via QPainter (no image files)
-- Colors matched from official Clawd sprite (Anthropic social media)
+## Layout
+- `claude_pet.py`: the app (sprite loading, behaviours, physics, launcher)
+- `sprites/clawd.json`: traced frames, palette, timings, loop points. Generated, don't hand-edit
+- `tools/fetch_official.py`: downloads the official Clawd GIFs from claude.ai into `assets/official/`
+- `tools/trace_official.py`: turns them into `sprites/clawd.json` and reports fidelity
+- `tests/test_pet.py`: `python -m unittest discover -s tests -v` (offscreen, no window appears)
+- `assets/`: reference media, git-ignored (Anthropic's art and personal screen recordings)
 
-## Architecture
-- Single file: `claude_pet.py`
-- Sprites defined as 2D grids of palette indices
-- `render(grid)` → QPixmap via QPainter
-- QTimer drives animation frames
-- QSystemTrayIcon for tray integration
-- `PX = 7` — screen pixels per sprite pixel
+## Sprites
+- All official Clawd art sits on one grid: the idle pose is 12x8 pixels and details
+  (eyes, props, sparks) use half-pixels, so sprites are 24x16 cells
+- Each animation stores `home`: where the idle pose sits inside it, so every animation lines up
+- Blink / look / happy / sleep faces are derived from the idle pose in `pose_rows()`,
+  copying how the official art draws them (the laptop wink, the dance's ^ ^ eyes)
+- Scale is screen pixels per cell (Small 3, Medium 4, Large 6, Huge 8), saved in QSettings
+
+## Palette (traced, shared by all animations)
+| Key | Color | Role |
+|-----|-------|------|
+| `#` | #d87756 | Body |
+| `@` | #141413 | Eyes, ink |
+| `*` | #bf694d | Shaded side (3/4 view) |
+| `%` `=` | #c5d3e0, #6a9bcc | Cloud |
+| `b` `e` | #eec875, #f2e3d7 | Sparks |
+| `&` `a` `c` `d` `f` `+` `g` | greys, ivory, light salmon | Kart and helmet |
 
 ## Development Approach
 
 Before implementing any changes, write a test script that validates the expected behavior. For example, if we're calling an API, first write a small script that hits the endpoint and asserts the response shape. Then implement the feature, running the test after each edit until it passes. If a test fails 3 times with the same approach, stop and propose an alternative strategy. Start by analyzing the current task and writing the test. Do this most of the time unless not very helpful — use judgment.
-
-## Palette
-| Key | Color | Role |
-|-----|-------|------|
-| 1 | #D47F5A (warm salmon) | Body |
-| 2 | near-black | Eyes |
-| 6 | gold #FCDB55 | Sparkle |
-| 7 | blue | Effect |
