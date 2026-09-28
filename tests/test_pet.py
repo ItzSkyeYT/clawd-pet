@@ -2076,6 +2076,166 @@ class SettingsReaction(unittest.TestCase):
         self.assertAlmostEqual(self.pet.y, self.pet.ground_y(), delta=2)
 
 
+class Physics(unittest.TestCase):
+    def setUp(self):
+        random.seed(2)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.pet.start("idle")
+        run_ms(self.pet, 100)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def throw(self, vx, vy, height, step=16, ms=6000):
+        pet = self.pet
+        geo = pet.screen_geometry()
+        pet.set_box_left(geo.left() + geo.width() / 2 - 150)
+        pet.y = pet.ground_y() - height
+        pet.start("fall")
+        pet.vx, pet.vy, pet.airborne = vx, vy, True
+        track = []
+        for _ in range(int(ms / step)):
+            pet.advance(step)
+            track.append((pet.x, pet.y, pet.vy, pet.airborne))
+        return track
+
+    def test_the_same_throw_at_any_frame_rate(self):
+        s = self.pet.scale
+        self.throw(80 * s, -120 * s, 400, step=16)
+        smooth = (self.pet.x, self.pet.y)
+        self.throw(80 * s, -120 * s, 400, step=50)            # a slow, stuttering machine
+        self.assertAlmostEqual(self.pet.x, smooth[0], delta=2 * s)
+        self.assertAlmostEqual(self.pet.y, smooth[1], delta=1)
+
+    def test_a_hard_landing_bounces_then_settles(self):
+        track = self.throw(0, 0, 600)
+        vys = [t[2] for t in track]
+        first = next(i for i, v in enumerate(vys) if v < 0)   # he came back up
+        self.assertTrue(track[first][3])
+        self.assertFalse(self.pet.airborne)
+        self.assertAlmostEqual(self.pet.y, self.pet.ground_y(), delta=1)
+
+    def test_a_small_drop_does_not_bounce(self):
+        track = self.throw(0, 0, 6)
+        self.assertFalse(any(t[2] < 0 for t in track))
+
+    def test_landing_sideways_he_skids_to_a_stop(self):
+        track = self.throw(120 * self.pet.scale, 0, 30)
+        land = next(i for i, t in enumerate(track) if not t[3])
+        self.assertGreater(track[land + 8][0], track[land][0] + self.pet.scale)   # still sliding
+        self.assertEqual(track[-1][0], track[-2][0])                             # then stopped
+
+    def test_air_slows_a_throw_a_little(self):
+        track = self.throw(100 * self.pet.scale, -200 * self.pet.scale, 300)
+        airborne = [t for t in track if t[3]]
+        dx = [b[0] - a[0] for a, b in zip(airborne, airborne[1:10])]
+        self.assertGreater(dx[0], dx[-1])
+
+    def drag(self, points):
+        """Press, move through (ms, x, y) points, release, on a fake clock."""
+        from PyQt6.QtCore import QEvent, QPointF
+        from PyQt6.QtGui import QMouseEvent
+        clock = [0.0]
+        self.pet._ms = lambda: clock[0]
+        local = QPointF(self.pet.home_px.x() + 10, self.pet.home_px.y() + 10)
+        kinds = ([QEvent.Type.MouseButtonPress] + [QEvent.Type.MouseMove] * (len(points) - 2)
+                 + [QEvent.Type.MouseButtonRelease])
+        for kind, (ms, x, y) in zip(kinds, points):
+            clock[0] = ms
+            ev = QMouseEvent(kind, local, QPointF(x, y), Qt.MouseButton.LeftButton,
+                             Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+            {QEvent.Type.MouseButtonPress: self.pet.mousePressEvent,
+             QEvent.Type.MouseMove: self.pet.mouseMoveEvent,
+             QEvent.Type.MouseButtonRelease: self.pet.mouseReleaseEvent}[kind](ev)
+
+    def test_a_throw_goes_with_your_last_flick(self):
+        slow = [(t, 500 + t // 25, 500) for t in range(0, 500, 50)]          # a slow drag...
+        flick = [(520, 520, 500), (540, 540, 500), (560, 560, 500), (580, 580, 500)]
+        self.drag(slow + flick + [(590, 590, 500)])                         # ...then a flick
+        self.assertAlmostEqual(self.pet.vx, 1000, delta=150)
+
+    def test_letting_go_after_stopping_is_just_a_drop(self):
+        moving = [(t, 500 + t, 500) for t in range(0, 300, 20)]
+        self.drag(moving + [(700, 780, 500), (710, 780, 500)])              # held still, then let go
+        self.assertAlmostEqual(self.pet.vx, 0, delta=50)
+
+    def test_he_flies_off_the_pointer_with_his_swing(self):
+        left, right = self.pet.box_span()
+        self.pet.cursor_moved(int((left + right) / 2), int(self.pet.y + self.pet.home_px.y() - 40))
+        self.pet.play("grab")
+        self.assertTrue(run_ms(self.pet, 3000, until=lambda: self.pet._dangling))
+        self.pet._swing, self.pet._swing_v = 0.2, 5.0          # swinging out to the right
+        self.pet._release = True
+        self.pet.advance(16)
+        self.assertFalse(self.pet._dangling)
+        self.assertGreater(self.pet.vx, 100)
+
+
+class Performance(unittest.TestCase):
+    def setUp(self):
+        random.seed(4)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.pet.show()
+        self.pet.timer.stop()
+        self.pet.start("idle")
+        run_ms(self.pet, 100)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.hide()
+        self.pet.deleteLater()
+
+    def test_standing_still_he_barely_ticks(self):
+        self.pet.particles = []
+        self.pet.advance(16)
+        self.assertGreaterEqual(self.pet._next_tick(), 100)
+
+    def test_moving_he_ticks_every_frame(self):
+        self.pet.start("walk")
+        run_ms(self.pet, 200)
+        self.assertEqual(self.pet._next_tick(), cp.TICK_MS)
+
+    def test_the_pointer_coming_near_wakes_him_at_once(self):
+        self.pet.timer.start(250)
+        left, right = self.pet.box_span()
+        self.pet.cursor_moved(int(right + 20), int(self.pet._mid()))
+        self.assertLessEqual(self.pet.timer.remainingTime(), cp.TICK_MS)
+
+    def test_flying_particles_do_not_reshape_him_every_tick(self):
+        calls = []
+        real = self.pet.setMask
+        self.pet.setMask = lambda m: (calls.append(1), real(m))
+        for k in range(6):                                     # a burst of fast confetti
+            self.pet._emit(f"confetti_{k % 5}", 12, -4, vx=random.uniform(-10, 10),
+                           vy=random.uniform(-15, -7), g=30, life=1800)
+        ticks = 0
+        for _ in range(int(1000 / 16)):
+            self.pet.advance(16)
+            ticks += 1
+        self.assertLess(len(calls), ticks / 2)                 # it used to be every one
+
+    def test_the_drop_catcher_ignores_particles(self):
+        self.pet.catcher = cp.DropCatcher(self.pet)
+        run_ms(self.pet, 100)
+        calls = []
+        real = self.pet.catcher.setMask
+        self.pet.catcher.setMask = lambda m: (calls.append(1), real(m))
+        for k in range(4):
+            self.pet._emit("heart", 6 + 3 * k, -3.0, vy=-4.0, life=1400)
+        run_ms(self.pet, 1000)
+        self.assertEqual(calls, [])
+        self.pet.catcher.deleteLater()
+
+    def test_screens_are_looked_up_once_in_a_while(self):
+        self.assertIs(cp.screen_areas(), cp.screen_areas())
+
+    def test_the_kwin_script_reports_the_pointer_coarsely_far_from_him(self):
+        js = cp.kwin_desktop_script()
+        self.assertIn("NEAR", js)
+        self.assertIn("FAR_STEP", js)
+
+
 class Launcher(unittest.TestCase):
     def test_clicking_opens_the_code_tab_of_the_app(self):
         self.assertEqual(cp.CLAUDE_LINKS["continue"], "claude://code/continue?session=last")

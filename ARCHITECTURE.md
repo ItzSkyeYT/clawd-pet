@@ -27,8 +27,22 @@ sprites/clawd.json   (committed; the only thing the app reads)
   when something visible changed. A 16 ms QTimer drives it; tests call it directly
 - Loops (walking, typing, driving, riding) repeat the traced `loop` segment as long
   as the behaviour wants, then play `outro`
-- Physics: dropped or thrown he falls with gravity, bounces off walls, lands with
-  the official Jumping squash
+- Physics: dropped or thrown he falls with gravity and a little air drag, bounces off
+  walls, and lands with the official Jumping squash. It runs in fixed `PHYS_STEP` (4 ms)
+  steps while he flies or skids, so a throw lands in the same place at any frame rate.
+  A hard landing (faster than `BOUNCE_MIN`, a fall of ~20 cells) bounces once at
+  `BOUNCE`; a sideways one skids to a stop (`SKID`), stopping at walls and dropping off
+  edges. A throw's speed is the drag's motion over its last `THROW_WINDOW` ms, timed on
+  a clock that isn't reset every tick; let go of a still drag and it's just a drop.
+  Coming off the pointer he's flung with his swing (the pendulum's tangential speed)
+- Ticks: `_next_tick()` asks for every frame only while he moves (flying, skidding,
+  walking, dragged, dangling); otherwise the timer sleeps until his next step, or a
+  particle's next cell, and at most `IDLE_TICK` (250 ms). `wake()` ticks at once for the
+  pointer near him, Claude Code, window changes, clicks and any new behaviour
+- Shape: the window is shaped to a pose, or to all of an animation's frames together
+  (so walking doesn't reshape it every step), plus props; flying particles go in as
+  `MASK_BLOCK` blocks. Each reshape is a round trip through the X server and KWin
+- `status()` has `counts` (ticks, paints, shapes, moves) for checking what he costs
 
 ## Multiple monitors
 - Each screen's floor is the bottom of its *usable* area. X11 (so XWayland) has one
@@ -89,7 +103,8 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
   stacks notifications above normal windows), with his exact shape, position and
   visibility (`_sync_catcher()` each tick). Being under him, it never sees the pointer,
   only drags. The KWin script marks it skip-taskbar/pager/switcher and doesn't watch his
-  own windows' geometry (he moves every frame)
+  own windows' geometry (he moves every frame). It follows his body and props, not
+  particles, and moves at most 10 times a second while he's moving (a drag freezes him)
 - A drop is accepted as Copy (or Link), never Move, so the source never deletes anything
 
 ## Settings
@@ -147,7 +162,9 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
 - He holds the arrow's tail: `cursor_grip()` is Breeze's tail offset scaled by `cursorSize`
   from kcminputrc. The dangle frames' grip cell is their topmost cell, so the pointer's tip
   (where clicks land) is always above everything he draws; hats are off while he hangs
-- `cursor_moved()` repositions him the moment the pointer moves, not at the next tick
+- `cursor_moved()` repositions him the moment the pointer moves, not at the next tick.
+  The KWin script reports the pointer every 2 px within 400 px of him (found through his
+  drop catcher) and only every 24 px further away
 - Swing: a pendulum driven by the grip's horizontal acceleration, damped, picks the
   straight / lean_1 / lean_2 frame (mirrored for the other side); calm spells get leg kicks
 - Faces are redrawn per frame by `eyes_rows()` at the eye cells the art gives

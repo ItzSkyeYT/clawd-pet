@@ -55,6 +55,14 @@ SPRITES = os.path.join(HERE, "sprites", "clawd.json")
 SCALES = {"Small": 3, "Medium": 4, "Large": 6, "Huge": 8}   # screen px per sprite pixel
 DEFAULT_SCALE = 4
 TICK_MS = 16
+IDLE_TICK = 250               # ms between ticks while nothing on screen needs moving
+PHYS_STEP = 4                 # ms: physics runs in steps this small, whatever the frame rate
+BOUNCE = 0.3                  # a hard landing bounces back up with this much of its speed...
+BOUNCE_MIN = 180              # ...if it's faster than this (cells/s): a fall of ~20 cells or more
+SKID = 6.0                    # 1/s: how quickly a sideways landing skids to a stop
+AIR_DRAG = 0.35               # 1/s: the air slowing him sideways
+THROW_WINDOW = 100            # ms: a throw goes as fast as the drag moved in its last moments
+MASK_BLOCK = 4                # cells: moving particles shape the window in blocks this big
 
 # Speeds in sprite pixels per second, so they grow with the pet. The tempos
 # speed up the official walk cycle so his legs keep up with the pace.
@@ -131,6 +139,7 @@ class Prefs:
     def __init__(self, settings=None):
         self.settings = settings
         self._mem = {}
+        self.version = 0                       # goes up with every change
 
     def __getitem__(self, key):
         default = PREF_DEFAULTS[key]
@@ -150,6 +159,7 @@ class Prefs:
         return str(v)
 
     def __setitem__(self, key, value):
+        self.version += 1
         if self.settings is None:
             self._mem[key] = value
         else:
@@ -974,10 +984,19 @@ def kwin_desktop_script():
     stacking, fullscreen, active, screen, id; never titles) over D-Bus."""
     return f"""
 const SERVICE = "{DBUS_SERVICE}";
+const NEAR = 400;             // px: closer than this to him, the pointer is reported in detail
+const FAR_STEP = 24;          // further off, only every this many px of movement
 let last = {{x: -1e6, y: -1e6}};
+let pet = null;               // his drop target, which sits exactly under him
 function sendCursor() {{
     const p = workspace.cursorPos;
-    if (Math.abs(p.x - last.x) + Math.abs(p.y - last.y) < 4) return;
+    let step = 4;
+    if (pet) {{
+        const g = pet.frameGeometry;
+        const off = Math.max(g.x - p.x, 0, p.x - g.x - g.width) + Math.max(g.y - p.y, 0, p.y - g.y - g.height);
+        step = off > NEAR ? FAR_STEP : 2;
+    }}
+    if (Math.abs(p.x - last.x) + Math.abs(p.y - last.y) < step) return;
     last = {{x: p.x, y: p.y}};
     callDBus(SERVICE, "/Pet", SERVICE, "Cursor", p.x + "," + p.y);
 }}
@@ -1013,11 +1032,12 @@ function tuck(w) {{
         w.skipTaskbar = true;
         w.skipPager = true;
         w.skipSwitcher = true;
+        pet = w;
     }}
 }}
 for (const w of workspace.windowList()) {{ tuck(w); watch(w); }}
 workspace.windowAdded.connect(function (w) {{ tuck(w); watch(w); sendWindows(); }});
-workspace.windowRemoved.connect(sendWindows);
+workspace.windowRemoved.connect(function (w) {{ if (w === pet) pet = null; sendWindows(); }});
 workspace.windowActivated.connect(sendWindows);
 workspace.currentDesktopChanged.connect(sendWindows);
 workspace.cursorPosChanged.connect(sendCursor);
@@ -1119,7 +1139,9 @@ def x11_work_area():
     Qt applies it too, but only once it notices the property, some time after
     startup; reading it ourselves (every 10 s at most) keeps the floors steady.
     """
-    if QApplication.platformName() != "xcb" or not shutil.which("xprop"):
+    if "xprop" not in _work_area:
+        _work_area["xprop"] = shutil.which("xprop")
+    if QApplication.platformName() != "xcb" or not _work_area["xprop"]:
         return None
     now = time.monotonic()
     if now - _work_area["checked"] > 10:
@@ -1133,13 +1155,21 @@ def x11_work_area():
     return _work_area["rect"]
 
 
+_screens = {"at": -1.0, "areas": None}
+
+
 def screen_areas():
+    """Each screen's usable area (looked up afresh at most twice a second)."""
+    now = time.monotonic()
+    if _screens["areas"] is not None and now - _screens["at"] < 0.5:
+        return _screens["areas"]
     work = x11_work_area()
     areas = []
     for sc in QApplication.screens():
         geo = sc.geometry()
         avail = geo.intersected(work) if work is not None else sc.availableGeometry()
         areas.append(usable_area(geo, avail))
+    _screens["areas"], _screens["at"] = areas, now
     return areas
 
 
@@ -1449,6 +1479,12 @@ class ClawdPet(QWidget):
         self._was_petting = False
         self._pet_ms = 0.0
         self._last_heart = -1e9
+        self._skid = 0.0                       # sideways speed left over from a landing
+        self._body_key = self._shape_key = None
+        self._body_mask = None                 # his shape without flying particles (the catcher's)
+        self._catcher_src = None
+        self._hat_cache = (None, None)
+        self.counts = {"ticks": 0, "paints": 0, "shapes": 0, "moves": 0}   # for status: what costs
 
         self._place_initially()
         self.start("idle")
@@ -1457,6 +1493,8 @@ class ClawdPet(QWidget):
 
         self.clock = QElapsedTimer()
         self.clock.start()
+        self._mono = QElapsedTimer()           # never restarted: for timing drags
+        self._mono.start()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._on_timer)
         self.timer.start(TICK_MS)
@@ -1572,6 +1610,10 @@ class ClawdPet(QWidget):
         return floor - self.home_px.y() - self.ih * self.scale
 
     def windows_changed(self, rows):
+        self.wake()
+        self._windows_changed(rows)
+
+    def _windows_changed(self, rows):
         """KWin's window list changed: ride along with the window he's on, and
         duck out of the way if something goes fullscreen on his screen."""
         new = []
@@ -1739,6 +1781,7 @@ class ClawdPet(QWidget):
         self.action = action
         self.script = getattr(self, "_act_" + action)(**kw)
         self.wait = 0.0
+        self.wake()
 
     def _next(self):
         mode = self.claude_mode()
@@ -1837,7 +1880,34 @@ class ClawdPet(QWidget):
         return side if area_at(edge, self._mid()) is None else None
 
     def _on_timer(self):
-        self.advance(min(self.clock.restart(), 100))
+        self.counts["ticks"] += 1
+        self.advance(min(self.clock.restart(), 1000))
+        self.timer.start(self._next_tick())
+
+    def _ms(self):
+        return self._mono.elapsed()
+
+    def _next_tick(self):
+        """Every frame while he moves; otherwise only when something on screen
+        is due to change (his next step, a particle crossing a cell), and at
+        least every IDLE_TICK: standing still costs next to nothing."""
+        if self.airborne or self.dragging or self._dangling or self.vx or self._skid:
+            return TICK_MS
+        wait = max(TICK_MS, min(self.wait, IDLE_TICK))
+        if self.now < self._nudge_until:
+            wait = min(wait, 75)
+        for q in self.particles:
+            if q.get("flap") or q.get("g"):
+                return TICK_MS
+            speed = max(abs(q["vx"]), abs(q["vy"]))          # cells/s: redraws needed per second
+            wait = min(wait, 500 / speed if speed else 200)
+        return int(max(TICK_MS, wait))
+
+    def wake(self):
+        """Something happened (the pointer came by, Claude Code, a click): tick now."""
+        timer = getattr(self, "timer", None)
+        if timer is not None and timer.isActive() and timer.remainingTime() > TICK_MS:
+            timer.start(0)
 
     def advance(self, dt):
         """Move the simulation on by dt milliseconds."""
@@ -1873,6 +1943,7 @@ class ClawdPet(QWidget):
         self._age_particles(dt)
         if (int(self.x), int(self.y)) != (self.pos().x(), self.pos().y()):
             self.move(int(self.x), int(self.y))
+            self.counts["moves"] += 1
         self._refresh()
         self._sync_catcher()
 
@@ -1881,27 +1952,41 @@ class ClawdPet(QWidget):
         c = self.catcher
         if c is None:
             return
-        if not self.isVisible() or self._mask is None:
+        if not self.isVisible() or self._body_mask is None:
             if c.isVisible():
                 c.hide()
             return
-        mask = self._mask
-        if self._drag_over and not c.mask().isEmpty():
-            mask = mask.united(c.mask())         # only grow mid-drag: a shrinking target would flicker
-        if c.mask() != mask:
+        body = self._body_mask                   # his body and props: particles can't take a drop
+        if body is not self._catcher_src:
+            mask = body
+            if self._drag_over and not c.mask().isEmpty():
+                mask = body.united(c.mask())     # only grow mid-drag: a shrinking target would flicker
             c.setMask(mask)
+            self._catcher_src = body
         want = self.geometry()
-        if c.geometry() != want and (want != self._catcher_want or self.now - self._catcher_at > 1000):
-            c.setGeometry(want)
+        moving = self.vx or self.airborne or self._dangling or self.dragging or self._skid
+        if c.geometry() != want and self.now - self._catcher_at >= (100 if moving else 0):
+            c.setGeometry(want)                  # on the move, ten times a second is plenty
             self._catcher_want, self._catcher_at = want, self.now
         if not c.isVisible():
             c.show()
 
     def _physics(self, dt):
+        """In fixed small steps while he flies or skids, so a throw lands in the
+        same place however fast (or slowly) the frames come."""
+        if not (self.airborne or self._skid):
+            self._physics_step(dt)
+            return
+        steps = max(1, math.ceil(dt / PHYS_STEP))
+        for _ in range(steps):
+            self._physics_step(dt / steps)
+
+    def _physics_step(self, dt):
         sec = dt / 1000
         s = self.scale
         if self.airborne:
             self.vy = min(self.vy + GRAVITY * s * sec, 250 * s)
+            self.vx *= math.exp(-AIR_DRAG * sec)
             was = self._feet()
             self._slide(self.vx * sec, bounce=True)
             self.y += self.vy * sec
@@ -1913,9 +1998,19 @@ class ClawdPet(QWidget):
             ground = (below[0] - self.home_px.y() - self.ih * s) if below else self.ground_y()
             if self.y >= ground:
                 self.y = ground
-                self.airborne = False
-                self.vx = self.vy = 0.0
+                if self.vy > BOUNCE_MIN * s:             # a hard landing: a little bounce
+                    self.vy = -self.vy * BOUNCE
+                    self.vx *= 0.7
+                else:                                   # down: skid off what's left sideways
+                    self.airborne = False
+                    self._skid, self.vx, self.vy = self.vx, 0.0, 0.0
             return
+        if self._skid:
+            x = self.x
+            self._slide(self._skid * sec)
+            self._skid *= math.exp(-SKID * sec)
+            if abs(self._skid) < 4 * s or self.x == x:  # stopped, or up against a wall
+                self._skid = 0.0
         if self.vx:
             self._slide(self.vx * sec)
         if not self.offscreen:
@@ -1923,7 +2018,8 @@ class ClawdPet(QWidget):
             self.standing_on = sup[3] if sup and abs(sup[0] - self._feet()) < 2 else None
             ground = self.ground_y()
             if self.y < ground - 1:
-                self.drop(self.vx * 0.6)         # walked off an edge
+                self.drop((self._skid or self.vx) * 0.6)   # walked (or skidded) off an edge
+                self._skid = 0.0
             elif self.y > ground:
                 self.y = ground                  # screens changed under him
 
@@ -2004,10 +2100,11 @@ class ClawdPet(QWidget):
                  self.catcher.isVisible()],
                 "at": [self.pos().x(), self.pos().y(), self.width(), self.height()],
                 "claude": self.prefs["claude"], "quiet": self.prefs["quiet"], "dangling": self._dangling,
-                "reminding": self.reminding}
+                "reminding": self.reminding, "counts": dict(self.counts)}
 
     def claude_event(self, msg):
         self.last_message = msg
+        self.wake()
         ev, sid = msg.get("event", ""), msg.get("session") or "?"
         if ev == "UserPromptSubmit":
             self._user_active()                    # you're here, followed or not
@@ -2091,6 +2188,9 @@ class ClawdPet(QWidget):
     def cursor_moved(self, x, y):
         prev = self.cursor
         self.cursor = (x, y, self.now)
+        left, right = self.box_span()
+        if abs(x - (left + right) / 2) < 2 * CURSOR_NEAR * self.scale and abs(y - self._mid()) < 3 * CURSOR_NEAR * self.scale:
+            self.wake()                          # near him: eyes, petting and grabs want a prompt tick
         if prev is None or (x, y) != prev[:2]:
             self._user_active()
         if self._dangling:                       # hanging on: keep up with it right away
@@ -2267,6 +2367,15 @@ class ClawdPet(QWidget):
     def _hat_key(self):
         """Which hat, and which of its frames: the Santa hat's pom-pom and the
         nightcap's tail swing as he moves (slowly while he sleeps)."""
+        when, key = self._hat_cache
+        now = (self.now, self.frame, self.action, self._dangling, self.prefs.version)
+        if when == now:
+            return key
+        key = self._work_out_hat()
+        self._hat_cache = (now, key)
+        return key
+
+    def _work_out_hat(self):
         name = self.hat()
         if name is None:
             return None
@@ -2329,29 +2438,60 @@ class ClawdPet(QWidget):
     def _refresh(self):
         """Repaint (and re-shape the window) only when something visible changed."""
         extras = self._extras()
-        state = (self.frame, self.lift, self._hat_key(), tuple((r.x(), r.y(), r.width()) for _, r in extras),
+        rects = tuple((r.x(), r.y(), r.width(), r.height()) for _, r in extras)
+        state = (self.frame, self.lift, self._hat_key(), rects,
                  tuple((q["kind"], int(q["x"]), int(q["y"]), self._fade(q)) for q in self.particles))
         if state == self._shown:
             return
-        mask = self._masks.get((self.frame, self.lift))
-        if mask is None:
-            bitmap = QBitmap.fromImage(self._pixmap(self.frame).toImage().createAlphaMask())
-            mask = QRegion(bitmap).translated(self._frame_pos(self.frame))
-            self._masks[(self.frame, self.lift)] = mask
-        for _, r in extras:
-            mask = mask.united(r)
-        for q in self.particles:
-            mask = mask.united(self._glyph_rect(q))
-        if mask.isEmpty():
-            mask = QRegion(0, 0, 1, 1)           # an empty mask would mean "no mask"
+        shape = self._shape_of(self.frame)
+        body_key = (shape, self.lift, rects)
+        if body_key != self._body_key:
+            body = self._masks.get((shape, self.lift))
+            if body is None:
+                body = self._frame_region(self.frame)
+                if shape[0] == "anim":               # all its frames at once: walking doesn't reshape him
+                    for i in range(len(self.sp.anims[shape[1]].frames)):
+                        body = body.united(self._frame_region(("anim", shape[1], i, shape[2])))
+                self._masks[(shape, self.lift)] = body
+            for r in rects:
+                body = body.united(QRect(*r))
+            self._body_mask, self._body_key = body, body_key
         # The window is shaped to Clawd (plus his Z's, hearts and bubble): the
         # empty space around him lets clicks through to whatever is behind.
         # The shape clips painting too, which is why the extras are part of it.
-        if mask != self._mask:
+        # Flying particles go in as coarse blocks, so the shape (a round trip
+        # to the X server and KWin) changes now and then, not every frame.
+        blocks = self._particle_blocks()
+        if (body_key, blocks) != self._shape_key:
+            mask = self._body_mask
+            for b in blocks:
+                mask = mask.united(QRect(*b))
+            if mask.isEmpty():
+                mask = QRegion(0, 0, 1, 1)           # an empty mask would mean "no mask"
             self.setMask(mask)
-            self._mask = mask
+            self.counts["shapes"] += 1
+            self._mask, self._shape_key = mask, (body_key, blocks)
         self._shown = state
         self.update()
+
+    @staticmethod
+    def _shape_of(frame):
+        """What his window is shaped to for this frame: a pose on its own, an
+        animation as all its frames together (so it doesn't change every step)."""
+        return ("anim", frame[1], frame[3]) if frame[0] == "anim" else frame
+
+    def _frame_region(self, key):
+        bitmap = QBitmap.fromImage(self._pixmap(key).toImage().createAlphaMask())
+        return QRegion(bitmap).translated(self._frame_pos(key))
+
+    def _particle_blocks(self):
+        b = MASK_BLOCK * self.scale
+        out = set()
+        for q in self.particles:
+            r = self._glyph_rect(q)
+            x0, y0 = r.left() // b * b, r.top() // b * b
+            out.add((x0, y0, -(-(r.right() + 1) // b) * b - x0, -(-(r.bottom() + 1) // b) * b - y0))
+        return tuple(sorted(out))
 
     def paint(self, p):
         at, pm = self._frame_pos(self.frame), self._pixmap(self.frame)
@@ -2371,6 +2511,7 @@ class ClawdPet(QWidget):
         p.setOpacity(1.0)
 
     def paintEvent(self, _event):
+        self.counts["paints"] += 1
         p = QPainter(self)
         self.paint(p)
         p.end()
@@ -3163,6 +3304,8 @@ class ClawdPet(QWidget):
                 shake_dir = d
             flips = [t for t in flips if self.now - t < SHAKE_MS]
             if len(flips) >= SHAKE_FLIPS or self._release:
+                vx += length * math.cos(self._swing) * self._swing_v      # flung off with his swing
+                vy -= length * math.sin(self._swing) * self._swing_v
                 break
             if tired_at is None and self.now >= end:
                 tired_at = self.now                 # had enough: one hand, then off
@@ -3890,12 +4033,13 @@ class ClawdPet(QWidget):
         self.start("fall")
 
     def mousePressEvent(self, e):
+        self.wake()
         self._user_active()
         if e.button() == Qt.MouseButton.LeftButton:
             self._button_down = self._on_done_button(e.position())
             self._press = e.globalPosition().toPoint()
             self._grab = self._press - QPoint(int(self.x), int(self.y))
-            self._trail = [(self.clock.elapsed(), self._press)]
+            self._trail = [(self._ms(), self._press)]
         e.accept()
 
     def mouseMoveEvent(self, e):
@@ -3911,7 +4055,7 @@ class ClawdPet(QWidget):
         if self.dragging:
             self.x, self.y = pos.x() - self._grab.x(), pos.y() - self._grab.y()
             self.move(int(self.x), int(self.y))
-            self._trail = (self._trail + [(self.clock.elapsed(), pos)])[-6:]
+            self._trail = (self._trail + [(self._ms(), pos)])[-40:]
         e.accept()
 
     def mouseReleaseEvent(self, e):
@@ -3920,8 +4064,10 @@ class ClawdPet(QWidget):
         on_button, self._button_down = self._button_down and self._on_done_button(e.position()), False
         if self.dragging:
             self.dragging = False
-            (t0, p0), (t1, p1) = self._trail[0], self._trail[-1]
-            dt = max(t1 - t0, 1) / 1000
+            self._trail.append((self._ms(), e.globalPosition().toPoint()))
+            t1, p1 = self._trail[-1]
+            t0, p0 = next((t, p) for t, p in self._trail if t1 - t <= THROW_WINDOW)
+            dt = max(t1 - t0, 8) / 1000
             limit = 400 * self.scale
             vx = max(-limit, min(limit, (p1.x() - p0.x()) / dt))
             vy = max(-limit, min(limit, (p1.y() - p0.y()) / dt))
