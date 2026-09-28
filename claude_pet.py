@@ -85,6 +85,7 @@ LABELS = {
     "perch_window": "Hop up onto a window", "hop_down": "Hop down from a window",
     "yawn": "Yawn and stretch", "morning": "Good morning (stretch and coffee)", "coffee": "Coffee",
     "remind_break": "Reminder: take a break", "remind_water": "Reminder: drink some water",
+    "grab": "Grab the pointer",
 }
 ON_A_WINDOW = ["walk", "wave", "jump", "jump_happy", "dance", "laptop", "sparkler", "sleep", "yawn"]
 LIVELY = ("dance", "race", "sparkler", "jump", "jump_happy", "cloud")   # calmer at night
@@ -92,7 +93,8 @@ BOUNCY = {"walk", "dance", "jump", "jump_happy", "celebrate", "race", "wave"}   
 AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["perch_window", "hop_down", "visit", "read"]
 CLAUDE_PREVIEWS = ["work", "attention", "celebrate"]
 TIME_SCENES = ["yawn", "morning", "coffee", "remind_break", "remind_water"]
-PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + TIME_SCENES + ["idle"])
+POINTER_SCENES = ["grab"]
+PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + TIME_SCENES + POINTER_SCENES + ["idle"])
 
 EXTRAS_FILE = os.path.join(HERE, "sprites", "extras.py")
 HATS = {"santa_hat": "Santa hat", "pumpkin_hat": "Pumpkin", "party_hat": "Party hat", "nightcap": "Nightcap"}
@@ -106,6 +108,7 @@ PREF_DEFAULTS = {
     "claude": True,           # follows Claude Code through its hooks
     "pointer": True,          # watches the pointer
     "petting": True,          # stroke him for hearts
+    "grab": True,             # jumps up and hangs off a pointer that hangs around above him
     "duck": True,             # drops out of sight for fullscreen windows
     "day_cycle": True,        # yawns and naps at night, coffee in the morning
     "seasons": True,          # hats and extras on holidays
@@ -161,6 +164,8 @@ IVORY = (250, 249, 245)
 BLUE = (106, 155, 204)        # Claude Code's own "professional blue"
 PINK = (232, 91, 106)
 GOLD = (238, 200, 117)        # the sparkler's sparks
+OLIVE = (120, 140, 93)        # Anthropic's olive green: the Done button
+OLIVE_DARK = (92, 108, 70)
 GREY = (156, 154, 146)
 RAIL_DARK = (77, 76, 72)      # the kart's greys
 RAIL_LIGHT = (156, 154, 146)
@@ -170,6 +175,23 @@ GLYPHS = {
     "z_small": (["##.", ".#.", ".##"], {"#": BLUE}),
     "z_big": (["####", "..#.", ".#..", "####"], {"#": BLUE}),
     "heart": ([".#.#.", "#####", "#####", ".###.", "..#.."], {"#": PINK}),
+    # a reminder's Done button: ink edge like the bubbles, olive face, ivory tick
+    "done_button": ([".##########.",
+                     "#=======++=#",
+                     "#======++==#",
+                     "#=++==++===#",
+                     "#==++++====#",
+                     "#===++=====#",
+                     "#==========#",
+                     ".##########."], {"#": INK, "=": OLIVE, "+": IVORY}),
+    "done_button_pressed": ([".##########.",
+                             "#==========#",
+                             "#=======++=#",
+                             "#======++==#",
+                             "#=++==++===#",
+                             "#==++++====#",
+                             "#===++=====#",
+                             ".##########."], {"#": INK, "=": OLIVE_DARK, "+": IVORY}),
     "bubble": ([".#######.",
                 "#+++++++#",
                 "#+++@+++#",
@@ -229,11 +251,22 @@ LADDER_PALETTE = {"d": RAIL_DARK, "l": RAIL_LIGHT}
 CURSOR_NEAR = 70              # sprite pixels: how close the pointer must be for him to watch it
 GLANCE_MS = 1400
 ARMS_UP = ("anim", "jump", 2, False)   # a folder is being dragged over him: "for me?"
+GRAB_REACH = 30               # cells above his head he'll jump up to the pointer from
+GRAB_LINGER = 1500            # ms the pointer hangs around above him before he might grab it
+GRAB_CHANCE = 0.45            # ...and then he does, this often
+GRAB_COOLDOWN = 3 * 60_000    # before he grabs it again on his own
+DANGLE_FOR = (15_000, 45_000) # how long he hangs on, unless you shake him off
+SHAKE_FLIPS = 4               # quick back-and-forths within SHAKE_MS shake him off
+SHAKE_MS = 1300
+SHAKE_SPEED = 700             # px/s: how fast a move must be to count toward a shake
+STRAIGHT, LEAN_1, LEAN_2, KICK_A, KICK_B, ONE_HAND = range(6)   # the dangle frames
 AWAY = 10 * 60_000            # no pointer movement or prompt for this long: you're away (a break)
 PRESENT = 90_000              # reminders only come while you've done something this recently
-REMIND_FOR = {"water": 120_000, "break": 180_000}   # how long he keeps at a reminder
-SNOOZE = 10 * 60_000          # an ignored reminder comes back after this
+REMIND_LOUD = 120_000         # a reminder's first two minutes are loud; then he just holds it up
 REMINDERS = ("remind_water", "remind_break")
+REMINDER_BITS = {"water_bubble", "break_bubble", "done_button", "done_button_pressed"}
+BUBBLE_AT = (23, -16)         # a reminder's bubble: over his right shoulder, clear of hats and bottles
+DONE_AT = (28, -1)            # its Done button: under the bubble, clear of the bottle at his side
 BUBBLES = {"bubble", "water_bubble", "break_bubble"}
 MUG_AT = (22, 1)              # the mug in his right hand, handle in his grip (idle cells)
 BOTTLE_UP = (16, -15)         # the bottle held up high in the cheering frame
@@ -454,6 +487,49 @@ def typing_eyes(rows, kind, body, ink):
     return ["".join(r) for r in g]
 
 
+def eyes_rows(rows, eyes, kind, body, ink):
+    """A frame with its eyes (2x2, top-left cells in `eyes`) redrawn as an
+    expression, the way pose_rows draws them on the idle pose."""
+    g = [list(r) for r in rows]
+    for ex, ey in eyes:
+        for dx in (0, 1):
+            for dy in (0, 1):
+                g[ey + dy][ex + dx] = body
+
+    def put(*cells):
+        for x, y in cells:
+            g[y][x] = ink
+    (lx, ly), (rx, ry) = eyes
+    for ex, ey in eyes:
+        if kind == "happy":                       # ^ ^
+            put((ex, ey), (ex + 1, ey), (ex - 1, ey + 1), (ex + 2, ey + 1))
+        elif kind == "surprised":                 # tall
+            put(*[(ex + dx, ey + dy) for dx in (0, 1) for dy in (0, 1, 2)])
+        elif kind in ("look_l", "look_r"):
+            d = -1 if kind == "look_l" else 1
+            put(*[(ex + d + dx, ey + dy) for dx in (0, 1) for dy in (0, 1)])
+        elif kind != "squeezed":
+            put(*[(ex + dx, ey + dy) for dx in (0, 1) for dy in (0, 1)])
+    if kind == "squeezed":                        # > <
+        put((lx, ly), (lx + 1, ly + 1), (lx, ly + 2), (rx + 1, ry), (rx, ry + 1), (rx + 1, ry + 2))
+    return ["".join(r) for r in g]
+
+
+def cursor_grip(path=os.path.expanduser("~/.config/kcminputrc")):
+    """Where on the pointer he holds on, from its tip: the tail of the arrow
+    (measured on Breeze's arrow: tip at (4, 4), tail at about (11, 20) at
+    size 24), scaled to the configured cursor size."""
+    size = 24
+    try:
+        with open(path) as f:
+            m = re.search(r"^\[Mouse\][^\[]*?^cursorSize=(\d+)", f.read(), re.M | re.S)
+        if m:
+            size = int(m.group(1))
+    except (OSError, ValueError):
+        pass
+    return round(size * 7 / 24), round(size * 16 / 24)
+
+
 def poke_rows(idle):
     """Poking with the right arm stretched out: 3 px further, a pixel thinner."""
     body = idle[0][4]
@@ -569,6 +645,29 @@ class Sprites:
             "size": [len(st["frames"][0][0]), len(st["frames"][0])], "home": st["home"],
             "frames": [{"ms": 300, "rows": rows} for rows in st["frames"]]}, st_pal)
         self.anims["stretch"].heads = [tuple(st["head"])] * len(st["frames"])
+        # Dangling from the pointer: both hands on one grip point at the frame's
+        # middle, frames STRAIGHT..ONE_HAND, redrawn with each expression.
+        self.dangle_drawn = "dangle" in extras      # grabbing the pointer waits for its art
+        if self.dangle_drawn:
+            dg = extras["dangle"]
+            dg_pal = {k: rgb(v) for k, v in dg["palette"].items()}
+            dg_frames, grip, eyes = dg["frames"], dg["grip"], dg["eyes"]
+        else:                                       # stand-in until it's drawn
+            dg_pal, dg_frames = palette, [hang_rows(idle)] * 6
+            grip, eyes = [self.iw // 2 - 1, 0], [[[EYES[0][0], EYES[0][1] + 4], [EYES[1][0], EYES[1][1] + 4]]] * 6
+        self.dangle_grip = tuple(grip)
+        (lx, ly), _ = eyes[STRAIGHT]
+        dg_home = [lx - EYES[0][0], ly - EYES[0][1]]      # his head where the idle pose has it
+        for kind in ("idle", "happy", "surprised", "squeezed", "look_l", "look_r"):
+            name = "dangle" if kind == "idle" else "dangle_" + kind
+            self.anims[name] = Anim(name, {
+                "size": [len(dg_frames[0][0]), len(dg_frames[0])], "home": dg_home,
+                "frames": [{"ms": 100, "rows": eyes_rows(f, eyes[i], kind, "#", "@")}
+                           for i, f in enumerate(dg_frames)]}, dg_pal)
+        # which way the lean frames swing him (+1: to the frame's right)
+        lean = dg_frames[LEAN_2]
+        cells = [x for r in lean for x, c in enumerate(r) if c != "."]
+        self.dangle_lean = 1 if sum(cells) / max(1, len(cells)) >= grip[0] + 1 else -1
         # nightcap_stretch: the nightcap with its tail flipped up, out of the left arm's way
         self.hats = {n: (images(n), tuple(extras[n]["anchor"])) for n in list(HATS) + ["nightcap_stretch"]}
         self.hats_flipped = {n: [flipped(img) for img in frames] for n, (frames, _) in self.hats.items()}
@@ -1261,14 +1360,25 @@ class ClawdPet(QWidget):
         self.prefs = Prefs(settings)
         self.wall = wall_clock                 # the date and time (tests set their own)
         self._hat_on = False                   # is a hat drawn on this frame
+        self.grip_offset = cursor_grip()       # where on the pointer he holds on
+        self._dangling = False
+        self._release = False                  # let go of the pointer (asked from outside)
+        self._swing = self._swing_v = 0.0      # his swing under the pointer (radians, rad/s)
+        self._linger = 0.0                     # how long the pointer has hung around above him
+        self._grab_cool = 0.0
         self._morning = None                   # the day he last had his morning coffee
         self._new_year = None                  # the year he last saw in
         self._input_at = 0.0                   # when you last moved the pointer or sent a prompt
         self._streak_at = 0.0                  # since when you've been at it without a break
         self._water_at = 0.0                   # when you last had water (or he started)
         self._snooze = {"water": 0.0, "break": 0.0}
-        self._ignores = {"water": 0, "break": 0}
         self._remind_checked = 0.0
+        # a reminder waiting for its Done button ("water" or "break"); kept across restarts
+        pending = settings.value("reminding") if settings is not None else None
+        self.reminding = pending if pending in ("water", "break") else None
+        self._remind_since = -REMIND_LOUD if self.reminding else 0.0   # back after a restart: calmly
+        self._button_down = False
+        self._nudge_until = 0.0
         self.catcher = None                    # his DropCatcher, on KDE Wayland
         self._drag_over = False
         self._drag_seen = 0.0
@@ -1472,7 +1582,8 @@ class ClawdPet(QWidget):
                 self.x += now["x"] - old["x"]
                 self.y += now["y"] - old["y"]
         self.window_list = new
-        if self.prefs["duck"] and self._fullscreen_here() and self.action != "duck" and not self.dragging:
+        if (self.prefs["duck"] and self._fullscreen_here() and self.action not in ("duck", "grab")
+                and not self.dragging):
             self.start("duck")
 
     def _screen_name(self):
@@ -1604,6 +1715,7 @@ class ClawdPet(QWidget):
             self._last_activity = self.now
         if self.action in REMINDERS:
             self.lift = 0                       # stopped mid-hop: he lands, rather than hanging there
+        self._dangling = False                  # off the pointer, whatever comes next
         self._leave_cloud()                     # interrupted mid-scene: drop the props
         self.layers = {}
         self.vx = 0.0 if not self.airborne else self.vx
@@ -1612,8 +1724,11 @@ class ClawdPet(QWidget):
         self.scripted = False
         if self.ladder.isVisible():
             self.ladder.hide()                  # interrupted mid-climb: pack it away
+        keep = {"heart"}
+        if self.reminding and action not in ("attention", "grab", "duck"):
+            keep |= REMINDER_BITS                # a reminder stays up until you press Done
         if action != "sleep":
-            self.particles = [q for q in self.particles if q["kind"] == "heart"]
+            self.particles = [q for q in self.particles if q["kind"] in keep]
         self.action = action
         self.script = getattr(self, "_act_" + action)(**kw)
         self.wait = 0.0
@@ -1626,8 +1741,10 @@ class ClawdPet(QWidget):
             self.start("duck")
         elif mode == "attention":
             self.start("attention")
+        elif self.reminding:
+            self.start("remind_" + self.reminding)
         elif self._due_reminder():
-            self.start(self._due_reminder())
+            self._begin_reminder(self._due_reminder())
         elif mode == "busy":
             self.start("work")
         elif self.celebrate is not None:
@@ -1742,6 +1859,7 @@ class ClawdPet(QWidget):
         else:
             self._petting(dt)
             self._watch_cursor()
+            self._maybe_grab(dt)
         self._age_particles(dt)
         if (int(self.x), int(self.y)) != (self.pos().x(), self.pos().y()):
             self.move(int(self.x), int(self.y))
@@ -1875,7 +1993,8 @@ class ClawdPet(QWidget):
                 [self.catcher.x(), self.catcher.y(), self.catcher.width(), self.catcher.height(),
                  self.catcher.isVisible()],
                 "at": [self.pos().x(), self.pos().y(), self.width(), self.height()],
-                "claude": self.prefs["claude"], "quiet": self.prefs["quiet"]}
+                "claude": self.prefs["claude"], "quiet": self.prefs["quiet"], "dangling": self._dangling,
+                "reminding": self.reminding}
 
     def claude_event(self, msg):
         self.last_message = msg
@@ -1927,7 +2046,7 @@ class ClawdPet(QWidget):
         """Switch to what Claude Code needs now, unless he's doing something you
         asked for or is in the middle of something physical; either way _next()
         catches up the moment he's done."""
-        if self.manual or self.dragging or self.airborne or self.action in ("held", "fall", "duck"):
+        if self.manual or self.dragging or self.airborne or self.action in ("held", "fall", "duck", "grab"):
             return
         # Anything else he's doing is his own idea, so Claude Code comes first,
         # even halfway up a ladder: the props vanish and he drops to the floor.
@@ -1947,7 +2066,7 @@ class ClawdPet(QWidget):
         if action in ("work", "attention"):
             self.start(action, manual=True, demo=True)
         elif action in REMINDERS:
-            self.start(action, manual=True, preview=True)
+            self._begin_reminder(action)
         else:
             self.start(action, manual=True)
 
@@ -1964,6 +2083,10 @@ class ClawdPet(QWidget):
         self.cursor = (x, y, self.now)
         if prev is None or (x, y) != prev[:2]:
             self._user_active()
+        if self._dangling:                       # hanging on: keep up with it right away
+            self._place_on_pointer()
+            self.move(int(self.x), int(self.y))
+            return
         left, right = self.box_span()
         top = self.y + self.home_px.y()
         m = 2 * self.scale
@@ -2043,7 +2166,7 @@ class ClawdPet(QWidget):
     def _bubble(self, on, kind="bubble"):
         """A speech bubble over his right shoulder ("!", coffee, water), moved
         clear of his hat. The bigger ones sit clear of a raised right arm too."""
-        self.particles = [q for q in self.particles if q["kind"] not in BUBBLES]
+        self.particles = [q for q in self.particles if q["kind"] != kind]
         if on:
             g = self.sp.glyphs[kind]
             x = self.iw - 1 if kind != "bubble" else self.iw - (3 if self.hat() else 8)
@@ -2054,6 +2177,9 @@ class ClawdPet(QWidget):
             q["age"] += dt
             if q["kind"] in BUBBLES:
                 q["y"] = q["y0"] - (q["age"] // 400) % 2      # a gentle bob
+            elif q["kind"] in ("done_button", "done_button_pressed"):
+                flash = self.now < self._nudge_until and int(self.now // 150) % 2 == 0
+                q["kind"] = "done_button_pressed" if self._button_down or flash else "done_button"
             elif q.get("flap"):                                # a bat: wings up, wings down, bobbing
                 q["kind"] = q["flap"][int(q["age"] // 130) % len(q["flap"])]
                 q["x"] += q["vx"] * dt / 1000
@@ -2115,6 +2241,8 @@ class ClawdPet(QWidget):
 
     def hat(self):
         """The hat he's wearing right now, or None."""
+        if self._dangling:                     # it would reach up past the pointer's tip
+            return None
         choice = self.prefs["hat"]
         if choice in HATS:
             return choice
@@ -2788,6 +2916,168 @@ class ClawdPet(QWidget):
         yield from self._walk_to(geo.left() + back if side < 0 else right_edge - width - back)
         self.offscreen = False
 
+    # ── Hanging off the pointer ───────────────────────────────────
+
+    def _grip_in_window(self, key=None):
+        """Where his hands are in the window, for a dangle frame: the line
+        between the frame's two middle columns, at the top of his hands."""
+        key = key or self.frame
+        at = self._frame_pos(key)
+        gx, gy = self.sp.dangle_grip
+        return at.x() + (gx + 1) * self.scale, at.y() + gy * self.scale
+
+    def _pointer_spot(self, key=None):
+        """The window position that puts his hands on the pointer's tail."""
+        x, y, _ = self.cursor
+        gx, gy = self._grip_in_window(key)
+        return x + self.grip_offset[0] - gx, y + self.grip_offset[1] - gy
+
+    def _place_on_pointer(self):
+        if self.cursor is not None:
+            self.x, self.y = self._pointer_spot()
+
+    def _can_reach(self, x, y):
+        """Is the pointer just above his head, where he can jump up to it?"""
+        left, right = self.box_span()
+        s = self.scale
+        top = self.y + self.home_px.y() - self.lift * s
+        return left - 10 * s <= x <= right + 10 * s and top - GRAB_REACH * s <= y <= top - 2 * s
+
+    def _maybe_grab(self, dt):
+        """A pointer hanging around just above him while he's idle: now and
+        then he jumps up and grabs it (one chance each time it comes by)."""
+        c = self.cursor
+        if (self.action != "idle" or self.manual or self.airborne or not self.prefs["grab"]
+                or not self.sp.dangle_drawn or self.prefs["quiet"] or c is None or self.now < self._grab_cool
+                or self.now - c[2] > 5000 or not self._can_reach(c[0], c[1])):
+            self._linger = 0.0
+            return
+        self._linger += dt
+        if self._linger >= GRAB_LINGER:
+            self._linger = -float("inf")          # rolled for this visit
+            if random.random() < GRAB_CHANCE:
+                self.start("grab")
+
+    def _act_grab(self):
+        """Jump up and grab the pointer, dangle from it while it moves
+        (swinging, kicking his legs), and let go when he's had enough or you
+        shake him off."""
+        if self.cursor is None:
+            return
+        yield from self._come_back()
+        c = self.cursor
+        left, right = self.box_span()
+        if not self._can_reach(c[0], c[1]):     # get under it, if it's along what he stands on
+            room_l, room_r = self._room()
+            w = right - left
+            target = min(max(c[0] - w / 2, left - room_l + 10), right + room_r - w - 10)
+            if abs(target - left) > 30:
+                yield from self._walk_to(target)
+        self.show_frame("jump", 1)                  # crouch
+        yield 160
+        yield from self._leap_to_pointer()
+        yield from self._dangle()
+
+    def _leap_to_pointer(self):
+        """Up to the pointer, homing in on it if it moves, arms up."""
+        self.scripted = True
+        x0, y0 = self.x, self.y
+        catch = ("anim", "dangle", STRAIGHT, False)
+        tx, ty = self._pointer_spot(catch)
+        dur = 320 + min(600.0, ((tx - x0) ** 2 + (ty - y0) ** 2) ** 0.5 * 0.9)
+        self.show_frame("cheer", 0)
+        t = 0.0
+        while t < dur:
+            yield TICK_MS
+            t = min(dur, t + TICK_MS)
+            u = t / dur
+            tx, ty = self._pointer_spot(catch)
+            e = u * u * (3 - 2 * u)
+            self.x = x0 + (tx - x0) * e
+            self.y = y0 + (ty - y0) * e - 6 * self.scale * 4 * u * (1 - u)
+
+    def _dangle(self):
+        self._dangling, self._release = True, False
+        self.scripted = True
+        self._swing = self._swing_v = 0.0
+        s = self.scale
+        length = 14 * s                             # grip to his middle
+        end = self.now + random.uniform(*DANGLE_FOR)
+        prev_x, vx, vy, prev_y = None, 0.0, 0.0, None
+        flips, shake_dir = [], 0
+        happy_until = self.now + 2500
+        kick_at, kick_until = self.now + random.uniform(3000, 7000), 0.0
+        face, face_until = "idle", 0.0
+        tired_at = None
+        while True:
+            c = self.cursor
+            if c is None:
+                break
+            dt = TICK_MS / 1000
+            gx, gy = c[0] + self.grip_offset[0], c[1] + self.grip_offset[1]
+            nvx = 0.0 if prev_x is None else (gx - prev_x) / dt
+            vy = 0.0 if prev_y is None else (gy - prev_y) / dt
+            ax = max(-40_000.0, min(40_000.0, (nvx - vx) / dt))
+            vx, prev_x, prev_y = nvx, gx, gy
+            # a pendulum: gravity pulls him back under the pointer, its moves swing him
+            acc = (-(GRAVITY * s / length) * math.sin(self._swing) - (ax / length) * math.cos(self._swing)
+                   - 3.0 * self._swing_v)
+            self._swing_v += acc * dt
+            self._swing = max(-0.9, min(0.9, self._swing + self._swing_v * dt))
+            # shaken back and forth: he can't hold on
+            if abs(nvx) > SHAKE_SPEED:
+                d = 1 if nvx > 0 else -1
+                if shake_dir and d != shake_dir:
+                    flips.append(self.now)
+                shake_dir = d
+            flips = [t for t in flips if self.now - t < SHAKE_MS]
+            if len(flips) >= SHAKE_FLIPS or self._release:
+                break
+            if tired_at is None and self.now >= end:
+                tired_at = self.now                 # had enough: one hand, then off
+            if tired_at is not None and self.now - tired_at > 1400:
+                break
+            # what he looks like
+            swing = abs(self._swing)
+            if tired_at is not None:
+                idx, face = ONE_HAND, "squeezed"
+            else:
+                if swing > 0.4:
+                    idx = LEAN_2
+                elif swing > 0.14:
+                    idx = LEAN_1
+                elif self.now < kick_until:
+                    idx = KICK_A if int(self.now // 220) % 2 == 0 else KICK_B
+                else:
+                    idx = STRAIGHT
+                    if self.now >= kick_at:
+                        kick_until, kick_at = self.now + 1300, self.now + random.uniform(4000, 9000)
+                if swing > 0.5 or abs(ax) > 25_000:
+                    face, face_until = "surprised", self.now + 600
+                elif self.now < happy_until:
+                    face = "happy"
+                elif self.now >= face_until:
+                    face = "idle" if random.random() < 0.97 else random.choice(("look_l", "look_r", "happy"))
+                    face_until = self.now + (900 if face != "idle" else 0)
+            side = 1 if self._swing >= 0 else -1     # which side of the pointer he hangs
+            mirror = idx in (LEAN_1, LEAN_2, ONE_HAND) and side != self.sp.dangle_lean
+            shown = {"look_l": "look_r", "look_r": "look_l"}.get(face, face) if mirror else face
+            self.show_frame("dangle" if shown == "idle" else "dangle_" + shown, idx, mirror)
+            self._place_on_pointer()
+            yield TICK_MS
+        yield from self._let_go(vx, vy)
+
+    def _let_go(self, vx, vy):
+        """Off the pointer: he drops, carrying its swing, and lands."""
+        self._dangling = False
+        self._grab_cool = self.now + GRAB_COOLDOWN
+        limit = 300 * self.scale
+        self.vx = max(-limit, min(limit, vx))
+        self.vy = max(-limit, min(limit, vy))
+        self.scripted = False
+        self.airborne = True
+        yield from self._fall()
+
     # ── Time of day ───────────────────────────────────────────────
 
     def _stretch(self, hold=1300):
@@ -2872,18 +3162,46 @@ class ClawdPet(QWidget):
         return None
 
     def _maybe_remind(self):
-        """Break into whatever he's doing on his own (or for Claude Code) for a reminder."""
-        due = self._due_reminder()
-        if (due and not self.manual and not self.dragging and not self.airborne
-                and self.action not in REMINDERS + ("held", "fall", "duck", "attention")
-                and self.claude_mode() != "attention"):
-            self.start(due)
+        """Break into whatever he's doing on his own (or for Claude Code) for a
+        reminder: a new one that's due, or one still waiting for its Done button."""
+        if (self.manual or self.dragging or self.airborne or self.claude_mode() == "attention"
+                or self.action in REMINDERS + ("held", "fall", "duck", "attention", "grab")):
+            return
+        if self.reminding:
+            self.start("remind_" + self.reminding)
+        elif self._due_reminder():
+            self._begin_reminder(self._due_reminder())
 
-    def acknowledge(self):
-        """You clicked him mid-reminder: seen it. He has a drink, or a coffee break with you."""
-        kind = "water" if self.action == "remind_water" else "break"
+    def _begin_reminder(self, action):
+        """A reminder goes up, and stays up (through anything, even a restart) until you press Done."""
+        self.reminding = action.split("_", 1)[1]
+        self._remind_since = self.now
+        if self.settings is not None:
+            self.settings.setValue("reminding", self.reminding)
+        self.start(action)
+
+    def _reminder_bits(self, on):
+        """The waiting reminder's bubble and its Done button, over his right shoulder."""
+        self.particles = [q for q in self.particles if q["kind"] not in REMINDER_BITS]
+        if on and self.reminding:
+            self._emit(self.reminding + "_bubble", *BUBBLE_AT, life=float("inf"))
+            self._emit("done_button", *DONE_AT, life=float("inf"))
+
+    def _on_done_button(self, pos):
+        pos = pos.toPoint() if hasattr(pos, "toPoint") else pos
+        return any(self._glyph_rect(q).contains(pos) for q in self.particles
+                   if q["kind"] in ("done_button", "done_button_pressed"))
+
+    def _loud(self):
+        return self.now - self._remind_since < REMIND_LOUD and not self.prefs["quiet"]
+
+    def confirm_reminder(self):
+        """Done: it's taken care of. He has a drink, or a coffee break with you."""
+        kind, self.reminding = self.reminding, None
+        if self.settings is not None:
+            self.settings.remove("reminding")
+        self._reminder_bits(False)
         other = "break" if kind == "water" else "water"
-        self._ignores[kind] = 0
         self._snooze[kind] = 0.0
         self._snooze[other] = max(self._snooze[other], self.now + 5 * 60_000)   # one at a time
         if kind == "water":
@@ -2892,18 +3210,6 @@ class ClawdPet(QWidget):
         else:
             self._streak_at = self.now
             self.start("coffee", manual=True, stay=random.uniform(12_000, 20_000))
-
-    def _ignored(self, kind):
-        """Nobody clicked: try again in a while, and after three goes, start the count again."""
-        self._ignores[kind] += 1
-        if self._ignores[kind] >= 3:
-            self._ignores[kind] = 0
-            if kind == "water":
-                self._water_at = self.now
-            else:
-                self._streak_at = self.now
-        else:
-            self._snooze[kind] = self.now + SNOOZE
 
     def _go_to_you(self):
         """Run over toward the pointer (as far as what he's standing on goes), if it's far off."""
@@ -2917,29 +3223,31 @@ class ClawdPet(QWidget):
             yield from self._walk_to(target)
             self.pose("idle")
 
-    def _act_remind_water(self, preview=False):
-        """Water time, as loud as he gets: runs over to you, hops up and down
-        waving a bottle, then holds it out with a water bubble, looking at you,
-        until you click him. If you move off, he follows."""
+    def _act_remind_water(self):
+        """Water time. For the first couple of minutes as loud as he gets: he
+        runs over to you (and follows), hops up and down waving a bottle, holds
+        it out, looking at you. Then he just holds it up, with a hop now and
+        then. The bubble and its Done button stay up until you press it."""
         yield from self._come_back()
-        end = self.now + (40_000 if preview else REMIND_FOR["water"])
+        self._reminder_bits(True)
         self.layers = {"water_bottle": BOTTLE_SIDE}
         n = 0
-        while self.now < end:
-            if n % 3 == 0:
-                yield from self._go_to_you()
-            n += 1
-            for _ in range(3):
-                yield from self._hop_with_bottle()
-            self.layers = {"water_bottle": BOTTLE_SIDE}
-            self.pose(self._glance())
-            self._bubble(True, "water_bubble")
-            yield 1900
-            self._bubble(False)
-        self.layers = {}
-        self.pose("idle")
-        self._ignored("water")
-        yield 300
+        while True:
+            if self._loud():
+                if n % 3 == 0:
+                    yield from self._go_to_you()
+                n += 1
+                for _ in range(3):
+                    yield from self._hop_with_bottle()
+                self.layers = {"water_bottle": BOTTLE_SIDE}
+                self.pose(self._glance())
+                yield 1900
+            else:
+                self.layers = {"water_bottle": BOTTLE_SIDE}
+                self.pose(self._glance() if random.random() < 0.3 else "idle")
+                yield random.uniform(3000, 6000)
+                if random.random() < 0.2:
+                    yield from self._hop_with_bottle()
 
     def _hop_with_bottle(self):
         bx, by = BOTTLE_UP
@@ -2978,22 +3286,24 @@ class ClawdPet(QWidget):
         self.pose("idle")
         yield 300
 
-    def _act_remind_break(self, preview=False):
-        """Break time: the coffee bubble, a big stretch, a look and a wave, until you click him."""
+    def _act_remind_break(self):
+        """Break time: the coffee bubble and its Done button, a look at you, a
+        wave and a hop (calmer after a couple of minutes), until you press Done."""
         yield from self._come_back()
-        yield from self._go_to_you()
-        end = self.now + (40_000 if preview else REMIND_FOR["break"])
-        self._bubble(True, "break_bubble")
-        while self.now < end:
-            yield from self._stretch(1100)
+        self._reminder_bits(True)
+        if self._loud():
+            yield from self._go_to_you()
+        while True:
+            loud = self._loud()
             self.pose(self._glance())
-            yield 1400
-            yield from self._once("wave")
+            yield 1400 if loud else random.uniform(3000, 6000)
+            if loud or random.random() < 0.3:
+                yield from self._once("wave")
             self.pose("idle")
-            yield 1600
-        self._bubble(False)
-        self._ignored("break")
-        yield 300
+            if loud:
+                yield 500
+                yield from self._once("jump")
+            yield 900 if loud else 400
 
     def _act_sleep(self):
         night = self.prefs["day_cycle"] and self.is_night()
@@ -3450,6 +3760,7 @@ class ClawdPet(QWidget):
     def mousePressEvent(self, e):
         self._user_active()
         if e.button() == Qt.MouseButton.LeftButton:
+            self._button_down = self._on_done_button(e.position())
             self._press = e.globalPosition().toPoint()
             self._grab = self._press - QPoint(int(self.x), int(self.y))
             self._trail = [(self.clock.elapsed(), self._press)]
@@ -3474,6 +3785,7 @@ class ClawdPet(QWidget):
     def mouseReleaseEvent(self, e):
         if e.button() != Qt.MouseButton.LeftButton or self._press is None:
             return
+        on_button, self._button_down = self._button_down and self._on_done_button(e.position()), False
         if self.dragging:
             self.dragging = False
             (t0, p0), (t1, p1) = self._trail[0], self._trail[-1]
@@ -3482,8 +3794,14 @@ class ClawdPet(QWidget):
             vx = max(-limit, min(limit, (p1.x() - p0.x()) / dt))
             vy = max(-limit, min(limit, (p1.y() - p0.y()) / dt))
             self.drop(vx, vy)
-        elif not self.airborne and self.action in REMINDERS:
-            self.acknowledge()                     # seen it: no Claude Code this time
+        elif self._dangling:
+            self._release = True
+        elif self.reminding and on_button:
+            self.confirm_reminder()
+        elif self.reminding:
+            self._nudge_until = self.now + 900     # "the button!": it flashes, he looks at it
+            if self.frame[0] == "pose":
+                self.pose("look_r")
         elif not self.airborne:
             waking = self.action == "sleep"
             kind = self.click_kind()
@@ -3574,6 +3892,8 @@ class ClawdPet(QWidget):
         self.prefs[key] = value
         if key == "quiet" and value and not self.manual and self.action in OWN_SCENE_ACTIONS:
             self.start("idle")                   # hush: wrap up whatever he was doing
+        if key == "grab" and not value and self._dangling:
+            self._release = True
         if key == "claude" and not value:        # stop following Claude Code: forget it all
             self.sessions.clear()
             self.celebrate, self.greet, self._stumble = None, False, False
@@ -3617,10 +3937,12 @@ class ClawdPet(QWidget):
         m.addAction("Open claude.ai").triggered.connect(lambda _=False: open_claude_web())
         m.addSeparator()
         play = m.addMenu("Play")
-        for group in (ACTIONS, AROUND_THE_DESKTOP, TIME_SCENES, CLAUDE_PREVIEWS):
+        for group in (ACTIONS, AROUND_THE_DESKTOP, POINTER_SCENES, TIME_SCENES, CLAUDE_PREVIEWS):
             if play.actions():
                 play.addSeparator()
             for key in group:
+                if key == "grab" and not self.sp.dangle_drawn:
+                    continue
                 play.addAction(LABELS[key]).triggered.connect(lambda _=False, k=key: self.play(k))
         hats = m.addMenu("Hat")
         hat_group = QActionGroup(hats)
@@ -3710,6 +4032,8 @@ class SettingsDialog(QDialog):
         lay = QVBoxLayout(box)
         lay.addWidget(self._check("pointer", "Watch the pointer"))
         lay.addWidget(self._check("petting", "Enjoy being petted (stroke him back and forth)"))
+        lay.addWidget(self._check("grab", "Grab onto the pointer when it hangs around above him "
+                                          "(shake it to get him off)"))
         lay.addWidget(self._check("duck", "Duck out of sight while something is fullscreen"))
         root.addWidget(box)
 

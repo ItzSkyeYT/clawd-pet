@@ -55,6 +55,12 @@ to what Claude Code is doing.
   celebrations); Claude Code working or needing you still shows
 - **Drag**: pick him up; let go and he falls (throw him and he bounces)
 - **Stroke him** with the pointer (back and forth): hearts, happy eyes, eventually a dance
+- **He grabs the pointer**: let it hang around just above him while he's idle and he may
+  jump up, grab the arrow's tail and dangle from it, swinging as you move and kicking his
+  legs. He lets go when he's had enough (hanging by one hand first) or when you shake the
+  pointer back and forth, and drops with the swing you gave him. Never over the tip, so
+  your clicks always go through. Play → "Grab the pointer" sends him after it wherever it
+  is; the setting is under Reactions
 - He watches a nearby pointer and glances at it now and then (on KDE Wayland a KWin
   script reports the pointer over D-Bus, since XWayland can't see it over other apps).
   Even while coding he looks up at a pointer that comes close (briefly, with a cooldown)
@@ -77,11 +83,13 @@ to what Claude Code is doing.
   nightcap), a stretch and a mug of coffee on the first morning visit, a Santa hat in
   December, a party hat with confetti at New Year (and a dance at midnight), a pumpkin
   with bats in the week before Halloween
-- **Reminders**: water every 45 min (he hops up and down waving a bottle, then holds it
-  out with a water bubble) and a break after 60 min at it (coffee bubble, stretches and
-  waves). Click him to say you've seen it: he has a drink, or a coffee break with you.
-  Ignored, he tries again in 10 min. Nothing while you're away (no pointer or prompt
-  for 10 min restarts the count), in quiet mode or in fullscreen
+- **Reminders**: water every 45 min (he runs over to you, hops up and down waving a bottle,
+  then holds it out) and a break after 60 min at it (a look, a wave, a hop). A bubble and
+  a green **Done** button stay up until you press the button: through being dragged or
+  thrown, fullscreen, a permission request and even a restart (QSettings `reminding`).
+  Loud for two minutes, then calm. A click on his body only flashes the button. After
+  Done he has a drink, or a coffee break with you. New ones don't start while you're away
+  (no pointer or prompt for 10 min restarts the count), in quiet mode or in fullscreen
 - Tray icon: click to hide/show
 
 ## Layout

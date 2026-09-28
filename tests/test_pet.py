@@ -10,6 +10,7 @@ Set CLAWD_SNAPSHOTS=/some/dir to also save a PNG of every animation's frames.
 """
 
 import json
+import math
 import os
 import random
 import socket
@@ -24,7 +25,7 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen:configfile=" + os.path.join(ROOT, "te
 os.environ["CLAWD_NO_DESKTOP_ICONS"] = "1"      # never read the real desktop's icons in tests
 sys.path.insert(0, ROOT)
 
-from PyQt6.QtCore import QRect, QSettings, Qt  # noqa: E402
+from PyQt6.QtCore import QPoint, QRect, QSettings, Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 APP = QApplication.instance() or QApplication([])
@@ -1492,6 +1493,40 @@ class Holidays(unittest.TestCase):
         self.assertNotEqual(xs[0], xs[-1])
 
 
+def click_at(pet, x, y):
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QMouseEvent
+    pos = QPointF(x, y)
+    glob = QPointF(pet.pos().x(), pet.pos().y()) + pos
+    for kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+        ev = QMouseEvent(kind, pos, glob, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier)
+        (pet.mousePressEvent if kind == QEvent.Type.MouseButtonPress else pet.mouseReleaseEvent)(ev)
+
+
+def press_done(pet):
+    button = [pet._glyph_rect(q) for q in pet.particles if q["kind"].startswith("done_button")]
+    assert button, "no Done button showing"
+    c = button[0].center()
+    click_at(pet, c.x(), c.y())
+
+
+def drag(pet, dx, dy):
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QMouseEvent
+    local = QPointF(pet.home_px.x() + 10, pet.home_px.y() + 10)
+    glob = QPointF(pet.pos().x(), pet.pos().y()) + local
+    steps = [(QEvent.Type.MouseButtonPress, glob)]
+    steps += [(QEvent.Type.MouseMove, glob + QPointF(dx * k / 5, dy * k / 5)) for k in range(1, 6)]
+    steps += [(QEvent.Type.MouseButtonRelease, glob + QPointF(dx, dy))]
+    for kind, g in steps:
+        ev = QMouseEvent(kind, local, g, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier)
+        {QEvent.Type.MouseButtonPress: pet.mousePressEvent, QEvent.Type.MouseMove: pet.mouseMoveEvent,
+         QEvent.Type.MouseButtonRelease: pet.mouseReleaseEvent}[kind](ev)
+        pet.advance(16)
+
+
 class Reminders(unittest.TestCase):
     def setUp(self):
         random.seed(6)
@@ -1511,84 +1546,108 @@ class Reminders(unittest.TestCase):
         self.pet._water_at = self.pet.now - self.pet.prefs["water_every"] * 60_000 - 1
         self.pet._input_at = self.pet.now
 
+    def bits(self):
+        return {q["kind"] for q in self.pet.particles if q["kind"] in cp.REMINDER_BITS}
+
+    def reminded(self, kind="water"):
+        self.water_due() if kind == "water" else None
+        run_ms(self.pet, 1100)
+        self.assertEqual(self.pet.action, "remind_" + kind)
+        self.assertEqual(self.pet.reminding, kind)
+
     def test_water_time_interrupts_what_he_is_doing(self):
         self.pet.claude_event({"event": "UserPromptSubmit", "session": "r"})
         run_ms(self.pet, 500)
         self.assertEqual(self.pet.action, "work")
-        self.water_due()
-        run_ms(self.pet, 1100)
-        self.assertEqual(self.pet.action, "remind_water")
+        self.reminded()
         self.pet.claude_event({"event": "PreToolUse", "session": "r", "tool": "Read"})
         run_ms(self.pet, 500)
         self.assertEqual(self.pet.action, "remind_water")          # Claude Code can wait
         self.pet.claude_event({"event": "PermissionRequest", "session": "r", "tool": "Bash"})
         run_ms(self.pet, 100)
         self.assertEqual(self.pet.action, "attention")             # ...but not a permission
+        self.assertEqual(self.bits(), set())                        # one bubble at a time
+        self.assertEqual(self.pet.reminding, "water")               # still waiting for Done
+        self.pet.claude_event({"event": "Stop", "session": "r"})
+        self.assertTrue(run_ms(self.pet, 6000, until=lambda: self.pet.action == "remind_water"))
+        self.assertIn("water_bubble", self.bits())
 
-    def test_he_hops_waving_the_bottle_and_holds_it_out(self):
-        self.water_due()
-        run_ms(self.pet, 1100)
-        lifts, bubble, droplets = set(), False, False
+    def test_he_hops_waving_the_bottle_with_the_bubble_and_button_up(self):
+        self.reminded()
+        lifts, droplets = set(), False
         for _ in range(int(5000 / 16)):
             self.pet.advance(16)
+            self.assertEqual(self.bits(), {"water_bubble", "done_button"})
             if "water_bottle" in self.pet.layers and self.pet.frame[1] == "cheer":
                 self.assertEqual(self.pet.layers["water_bottle"][1], cp.BOTTLE_UP[1] - self.pet.lift)
                 lifts.add(self.pet.lift)
-            bubble = bubble or any(q["kind"] == "water_bubble" for q in self.pet.particles)
             droplets = droplets or any(q["kind"].startswith("droplet") for q in self.pet.particles)
         self.assertIn(5, lifts)
-        self.assertTrue(bubble and droplets)
+        self.assertTrue(droplets)
 
     def test_he_runs_over_to_you_first(self):
         geo = self.pet.screen_geometry()
         self.pet.set_box_left(geo.left() + 100)
         far = geo.left() + geo.width() - 200
         self.pet.cursor_moved(far, geo.top() + 300)
-        self.water_due()
-        run_ms(self.pet, 1100)
-        self.assertEqual(self.pet.action, "remind_water")
+        self.reminded()
         self.assertTrue(run_ms(self.pet, 30_000, until=lambda: self.pet.frame[1] == "cheer"))
         left, right = self.pet.box_span()
         self.assertLess(abs((left + right) / 2 - far), 300)
 
-    def test_a_click_says_seen_it_and_he_drinks(self):
-        self.water_due()
-        run_ms(self.pet, 1100)
+    def test_it_stays_until_you_press_done_and_calms_down(self):
+        self.reminded()
+        hops = lambda ms: sum(1 for _ in range(int(ms / 16))
+                              if not self.pet.advance(16) and self.pet.frame[1] == "cheer")
+        loud = hops(20_000)
+        run_ms(self.pet, cp.REMIND_LOUD)
+        calm = hops(20_000)
+        self.assertLess(calm, loud / 3)
+        run_ms(self.pet, 10 * 60_000)
+        self.assertEqual(self.pet.action, "remind_water")          # ten minutes on: still there
+        self.assertEqual(self.bits(), {"water_bubble", "done_button"})
+
+    def test_a_click_on_him_just_points_you_at_the_button(self):
+        self.reminded()
         click(self.pet)
+        run_ms(self.pet, 50)
+        self.assertEqual(self.pet.reminding, "water")
+        self.assertEqual(self.pet.action, "remind_water")
+        self.assertEqual(self.launched, [])                         # and no Claude Code
+        self.assertTrue(run_ms(self.pet, 400, until=lambda: "done_button_pressed" in self.bits()))
+
+    def test_done_and_he_drinks(self):
+        self.reminded()
+        press_done(self.pet)
+        self.assertIsNone(self.pet.reminding)
         self.assertEqual(self.pet.action, "drink")
-        self.assertEqual(self.launched, [])                         # no Claude Code this time
+        self.assertEqual(self.bits(), set())
         self.assertEqual(self.pet._water_at, self.pet.now)
         self.assertTrue(run_ms(self.pet, 8000, until=lambda: self.pet.action != "drink"))
-        self.assertEqual(self.pet.lift, 0)
         click(self.pet)
-        self.assertEqual(self.launched, ["continue"])               # back to normal
+        self.assertEqual(self.launched, ["continue"])               # back to normal clicks
+
+    def test_moving_him_keeps_the_reminder(self):
+        self.reminded()
+        run_ms(self.pet, 700)
+        drag(self.pet, 300, -200)                                   # picked up and thrown
+        self.assertEqual(self.pet.reminding, "water")
+        self.assertTrue(self.pet.airborne)
+        self.assertEqual(self.bits(), {"water_bubble", "done_button"})   # it comes along
+        self.assertTrue(run_ms(self.pet, 8000, until=lambda: self.pet.action == "remind_water"))
+        self.assertEqual(self.bits(), {"water_bubble", "done_button"})
+        self.assertEqual(self.launched, [])
 
     def test_one_reminder_at_a_time(self):
-        self.water_due()
         self.pet._streak_at = self.pet.now - 61 * 60_000            # a break is due too
-        run_ms(self.pet, 1100)
-        self.assertEqual(self.pet.action, "remind_water")
-        click(self.pet)
+        self.reminded()
+        press_done(self.pet)
         self.assertTrue(run_ms(self.pet, 8000, until=lambda: self.pet.action != "drink"))
         run_ms(self.pet, 2000)
         self.assertNotEqual(self.pet.action, "remind_break")        # not straight after
         self.pet.now += 5 * 60_000
         self.pet._input_at = self.pet.now
         self.assertEqual(self.pet._due_reminder(), "remind_break")
-
-    def test_ignored_it_comes_back_later(self):
-        self.water_due()
-        run_ms(self.pet, 1100)
-        self.assertTrue(run_ms(self.pet, cp.REMIND_FOR["water"] + 6000,
-                               until=lambda: self.pet.action != "remind_water"))
-        self.assertIsNone(self.pet._due_reminder())
-        self.pet.now = self.pet._snooze["water"] + 1
-        self.pet._input_at = self.pet.now
-        self.assertEqual(self.pet._due_reminder(), "remind_water")
-        for _ in range(2):                                          # third time unanswered: count again
-            self.pet._ignored("water")
-        self.assertIsNone(self.pet._due_reminder())
-        self.assertEqual(self.pet._water_at, self.pet.now)
 
     def test_not_while_you_are_away_or_he_is_quiet(self):
         self.water_due()
@@ -1605,10 +1664,9 @@ class Reminders(unittest.TestCase):
         self.pet.prefs["water"] = False
         self.pet._streak_at = self.pet.now - 61 * 60_000
         self.pet._input_at = self.pet.now
-        run_ms(self.pet, 1100)
-        self.assertEqual(self.pet.action, "remind_break")
-        self.assertTrue(any(q["kind"] == "break_bubble" for q in self.pet.particles))
-        click(self.pet)
+        self.reminded("break")
+        self.assertEqual(self.bits(), {"break_bubble", "done_button"})
+        press_done(self.pet)
         self.assertEqual(self.pet.action, "coffee")                 # he takes one with you
         self.assertEqual(self.pet._streak_at, self.pet.now)
 
@@ -1619,10 +1677,219 @@ class Reminders(unittest.TestCase):
         self.assertEqual(self.pet._streak_at, self.pet.now)
         self.assertEqual(self.pet._water_at, self.pet.now)
 
-    def test_the_menu_previews_run_by_themselves(self):
+    def test_the_menu_ones_stay_until_done_too(self):
         self.pet.play("remind_water")
-        self.assertTrue(self.pet.manual)
-        self.assertTrue(run_ms(self.pet, 50_000, until=lambda: self.pet.action != "remind_water"))
+        run_ms(self.pet, 60_000)
+        self.assertEqual(self.pet.action, "remind_water")
+        press_done(self.pet)
+        self.assertIsNone(self.pet.reminding)
+
+    def test_a_waiting_reminder_survives_a_restart(self):
+        path = os.path.join(tempfile.mkdtemp(), "clawd.conf")
+        first = cp.ClawdPet(cp.load_sprites(), settings=QSettings(path, QSettings.Format.IniFormat))
+        first.show()
+        first.play("remind_break")
+        first.advance(16)
+        first.settings.sync()
+        first.timer.stop()
+        first.hide()
+        again = cp.ClawdPet(cp.load_sprites(), settings=QSettings(path, QSettings.Format.IniFormat))
+        again.show()
+        self.assertEqual(again.reminding, "break")
+        self.assertTrue(run_ms(again, 3000, until=lambda: again.action == "remind_break"))
+        again.advance(16)
+        press_done(again)
+        again.settings.sync()
+        self.assertIsNone(QSettings(path, QSettings.Format.IniFormat).value("reminding"))
+        again.timer.stop()
+        again.hide()
+
+    def test_hanging_off_the_pointer_hides_it_for_a_while(self):
+        self.reminded()
+        left, right = self.pet.box_span()
+        self.pet.cursor_moved(int((left + right) / 2), int(self.pet.y + self.pet.home_px.y() - 40))
+        self.pet.play("grab")
+        self.assertTrue(run_ms(self.pet, 3000, until=lambda: self.pet._dangling))
+        self.assertEqual(self.bits(), set())                        # nothing up by the pointer's tip
+        self.pet._release = True
+        self.assertTrue(run_ms(self.pet, 10_000, until=lambda: self.pet.action == "remind_water"))
+        self.assertEqual(self.bits(), {"water_bubble", "done_button"})
+
+    def test_the_button_is_clear_of_him_and_his_bottle(self):
+        from PyQt6.QtGui import QBitmap, QRegion
+        for kind in ("water", "break"):
+            self.pet._water_at = self.pet.now if kind == "break" else self.pet._water_at
+            self.pet.play("remind_" + kind)
+            for _ in range(int(12_000 / 16)):
+                self.pet.advance(16)
+                button = [self.pet._glyph_rect(q) for q in self.pet.particles if q["kind"].startswith("done")]
+                if not button:
+                    continue
+                frame = QRegion(QBitmap.fromImage(
+                    self.pet._pixmap(self.pet.frame).toImage().createAlphaMask())).translated(
+                    self.pet._frame_pos(self.pet.frame))
+                self.assertFalse(frame.intersects(button[0]), (kind, self.pet.frame))
+                for img, r in self.pet._extras():
+                    self.assertFalse(r.intersects(button[0]), (kind, self.pet.layers))
+            press_done(self.pet)
+
+
+class GrabThePointer(unittest.TestCase):
+    def setUp(self):
+        random.seed(12)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.pet.start("idle")
+        run_ms(self.pet, 100)
+        self.launched = []
+        self.pet.launch_claude_code = lambda kind="continue": self.launched.append(kind)
+        self.chance = cp.GRAB_CHANCE
+
+    def tearDown(self):
+        cp.GRAB_CHANCE = self.chance
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def above_him(self, up=40):
+        left, right = self.pet.box_span()
+        return int((left + right) / 2), int(self.pet.y + self.pet.home_px.y() - up)
+
+    def hang_on(self):
+        x, y = self.above_him()
+        self.pet.cursor_moved(x, y)
+        self.pet.play("grab")
+        self.assertTrue(run_ms(self.pet, 3000, until=lambda: self.pet._dangling))
+        return x, y
+
+    def hands(self):
+        gx, gy = self.pet._grip_in_window()
+        return round(self.pet.x + gx), round(self.pet.y + gy)
+
+    def test_a_pointer_hanging_around_above_him_gets_grabbed(self):
+        cp.GRAB_CHANCE = 1.0
+        self.pet.sp.dangle_drawn = True
+        x, y = self.above_him()
+        for i in range(150):                                   # the pointer idles just above him
+            self.pet.cursor_moved(x + i % 3, y)
+            self.pet.advance(16)
+            if self.pet.action == "grab":
+                break
+        self.assertEqual(self.pet.action, "grab")
+        self.assertTrue(run_ms(self.pet, 3000, until=lambda: self.pet._dangling))
+        cx, cy, _ = self.pet.cursor
+        self.assertEqual(self.hands(), (cx + self.pet.grip_offset[0], cy + self.pet.grip_offset[1]))
+
+    def test_his_hands_stay_on_the_pointer_as_it_moves(self):
+        x, y = self.hang_on()
+        for k in range(1, 40):
+            self.pet.cursor_moved(x + 6 * k, y + 2 * k)
+            self.pet.advance(16)
+            self.assertEqual(self.hands(), (x + 6 * k + self.pet.grip_offset[0],
+                                            y + 2 * k + self.pet.grip_offset[1]))
+
+    def test_he_never_covers_the_tip_of_the_pointer(self):
+        x, y = self.hang_on()
+        for k in range(300):                                  # wherever it goes, clicks go past him
+            px, py = x + int(300 * math.sin(k / 9)), y + int(120 * math.cos(k / 7))
+            self.pet.cursor_moved(px, py)
+            self.pet.advance(16)
+            if not self.pet._dangling:
+                break
+            tip = QPoint(px - int(self.pet.x), py - int(self.pet.y))
+            self.assertFalse(self.pet._mask.contains(tip), (k, px, py))
+            self.assertGreater(self.pet._mask.boundingRect().top(), tip.y(), (k, px, py))
+
+    def test_he_swings_behind_when_you_pull_him_along(self):
+        x, y = self.hang_on()
+        run_ms(self.pet, 500)
+        leans = []
+        for k in range(1, 20):
+            self.pet.cursor_moved(x + 25 * k, y)               # quickly to the right
+            self.pet.advance(16)
+            if self.pet.frame[2] in (cp.LEAN_1, cp.LEAN_2):
+                leans.append(self.pet.frame)
+        self.assertTrue(leans)
+        # drawn hanging off to the left of the pointer, trailing behind it
+        self.assertTrue(all((-1 if f[3] else 1) * self.pet.sp.dangle_lean < 0 for f in leans), leans)
+        run_ms(self.pet, 3000)                                # it stops: he settles under it
+        self.assertLess(abs(self.pet._swing), 0.14)
+
+    def test_shake_him_off(self):
+        x, y = self.hang_on()
+        run_ms(self.pet, 300)
+        for k in range(60):
+            self.pet.cursor_moved(x + (60 if k % 4 < 2 else -60), y)
+            self.pet.advance(16)
+            if not self.pet._dangling:
+                break
+        self.assertFalse(self.pet._dangling)
+        self.assertTrue(self.pet.airborne)
+        self.assertTrue(run_ms(self.pet, 8000, until=lambda: not self.pet.airborne))
+
+    def test_he_lets_go_when_he_has_had_enough(self):
+        self.hang_on()
+        one_hand = lambda: self.pet.frame[1].startswith("dangle") and self.pet.frame[2] == cp.ONE_HAND
+        self.assertTrue(run_ms(self.pet, cp.DANGLE_FOR[1] + 3000, until=one_hand))
+        self.assertEqual(self.pet.frame[1], "dangle_squeezed")
+        self.assertTrue(run_ms(self.pet, 3000, until=lambda: not self.pet._dangling))
+        self.assertTrue(run_ms(self.pet, 8000, until=lambda: self.pet.action != "grab"))
+        self.assertGreater(self.pet._grab_cool, self.pet.now)
+
+    def test_a_click_while_he_hangs_only_makes_him_let_go(self):
+        self.hang_on()
+        click(self.pet)
+        run_ms(self.pet, 50)
+        self.assertFalse(self.pet._dangling)
+        self.assertEqual(self.launched, [])
+
+    def test_anything_else_taking_over_ends_the_dangle(self):
+        x, y = self.hang_on()
+        self.pet.start("held")
+        self.assertFalse(self.pet._dangling)
+        before = (self.pet.x, self.pet.y)
+        self.pet.cursor_moved(x + 200, y + 50)
+        self.assertEqual((self.pet.x, self.pet.y), before)     # no longer following the pointer
+
+    def test_no_hat_while_he_hangs(self):
+        self.pet.prefs["hat"] = "santa_hat"
+        self.hang_on()
+        self.assertIsNone(self.pet.hat())
+
+    def test_claude_code_waits_until_he_lets_go(self):
+        self.hang_on()
+        self.pet.claude_event({"event": "UserPromptSubmit", "session": "g"})
+        run_ms(self.pet, 500)
+        self.assertEqual(self.pet.action, "grab")
+
+    def test_not_when_turned_off_or_in_quiet_mode(self):
+        cp.GRAB_CHANCE = 1.0
+        for grab, quiet in ((False, False), (True, True)):
+            self.pet.prefs["grab"], self.pet.prefs["quiet"] = grab, quiet
+            x, y = self.above_him()
+            for i in range(150):
+                self.pet.cursor_moved(x + i % 3, y)
+                self.pet.advance(16)
+            self.assertNotEqual(self.pet.action, "grab")
+
+    def test_turning_it_off_makes_him_let_go(self):
+        self.hang_on()
+        self.pet.set_pref("grab", False)
+        run_ms(self.pet, 50)
+        self.assertFalse(self.pet._dangling)
+
+    def test_from_the_menu_he_goes_to_the_pointer_wherever_it_is(self):
+        geo = self.pet.screen_geometry()
+        px, py = geo.left() + geo.width() - 300, geo.top() + 200
+        self.pet.cursor_moved(px, py)
+        self.pet.play("grab")
+        self.assertTrue(run_ms(self.pet, 20_000, until=lambda: self.pet._dangling))
+        self.assertEqual(self.hands(), (px + self.pet.grip_offset[0], py + self.pet.grip_offset[1]))
+
+    def test_the_grip_follows_the_cursor_size(self):
+        path = os.path.join(tempfile.mkdtemp(), "kcminputrc")
+        with open(path, "w") as f:
+            f.write("[General]\ncursorSize=12\n[Mouse]\ncursorTheme=breeze_cursors\ncursorSize=48\n")
+        self.assertEqual(cp.cursor_grip(path), (14, 32))
+        self.assertEqual(cp.cursor_grip(path + ".missing"), (7, 16))
 
 
 class Launcher(unittest.TestCase):

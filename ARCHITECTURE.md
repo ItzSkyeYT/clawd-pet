@@ -115,10 +115,30 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
 - Activity: pointer movement (the KWin feed), prompts and clicks set `_input_at`; 10 min
   with none (`AWAY`) counts as a break and restarts both counts. KDE refuses
   `GetSessionIdleTime` on Wayland, so keyboard-only stretches aren't seen
-- `_maybe_remind()` (once a second) starts `remind_water` / `remind_break` when due, over
-  anything that isn't manual, physical or a permission request; `_react()` lets only a
-  permission request cut in. A click on him during one calls `acknowledge()` instead of
-  opening Claude Code. Ignored: snooze 10 min; after three goes the count restarts
+- A reminder is a pending state (`reminding`, saved in QSettings) that only the Done button
+  clears (`confirm_reminder()`). `start()` keeps its bubble and button through any other
+  behaviour except a permission request, hanging off the pointer and ducking (they'd
+  collide or cover the pointer's tip); `_next()` and `_maybe_remind()` (once a second) go
+  back to it first. `REMIND_LOUD` ms of hopping, then calm. New ones come when due, over
+  anything that isn't manual, physical or a permission request
+- The bubble sits at `BUBBLE_AT`, the button at `DONE_AT`: clear of hats (they droop left),
+  the raised and the side-held bottle, and every pose he takes in a reminder (a test checks
+  the button against his pixels and props)
+
+## Hanging off the pointer
+- `_maybe_grab()` counts how long the pointer stays within reach above his head while he's
+  idle (it must have moved in the last 5 s); after `GRAB_LINGER` he rolls once per visit
+- `_act_grab`: walk under it if it's along his floor, crouch, `_leap_to_pointer()` (a homing
+  arc, so a moving pointer is still caught), then `_dangle()` until he lets go (`_let_go()`
+  hands him to the normal fall with the pointer's velocity)
+- He holds the arrow's tail: `cursor_grip()` is Breeze's tail offset scaled by `cursorSize`
+  from kcminputrc. The dangle frames' grip cell is their topmost cell, so the pointer's tip
+  (where clicks land) is always above everything he draws; hats are off while he hangs
+- `cursor_moved()` repositions him the moment the pointer moves, not at the next tick
+- Swing: a pendulum driven by the grip's horizontal acceleration, damped, picks the
+  straight / lean_1 / lean_2 frame (mirrored for the other side); calm spells get leg kicks
+- Faces are redrawn per frame by `eyes_rows()` at the eye cells the art gives
+- Shake: `SHAKE_FLIPS` direction changes faster than `SHAKE_SPEED` within `SHAKE_MS`
 
 ## Props and icons
 - The ladder is a separate unmanaged, click-through window (`Prop`), placed on the
