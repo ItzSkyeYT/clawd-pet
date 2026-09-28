@@ -133,7 +133,11 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
   flood him). He comes down first if he was hanging off the pointer (`_land_first()`)
 
 ## Hanging off the pointer
-- `_maybe_grab()` counts how long the pointer stays within reach (up to `GRAB_REACH` cells
+- Held right above him (`GRAB_SURE_SIDE`) for `GRAB_HOLD` ms, the pointer is always
+  grabbed: no chance, no cooldown, any state but `NEVER_GRAB`, even in quiet mode. After
+  a let-go that's disarmed (`_sure_armed`) until the pointer leaves the spot, so shaking
+  him off doesn't bounce him straight back on
+- Otherwise `_maybe_grab()` counts how long the pointer stays within reach (up to `GRAB_REACH` cells
   above his head, `GRAB_SIDE` to either side) while he's idle or in a light scene
   (`GRAB_WHILE`, on the ground); it must have moved in the last 5 s. After `GRAB_LINGER`
   he rolls `GRAB_CHANCE` once per visit

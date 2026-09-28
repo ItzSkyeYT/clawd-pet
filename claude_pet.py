@@ -257,6 +257,9 @@ GRAB_LINGER = 700             # ms the pointer hangs around near him before he m
 GRAB_CHANCE = 0.8             # ...and then he does, this often
 GRAB_COOLDOWN = 45_000        # before he grabs it again on his own (a third of that when lively)
 GRAB_WHILE = {"idle", "walk", "wave", "jump", "jump_happy", "dance", "sparkler", "laptop", "yawn"}
+GRAB_WALK = 80                # cells he'll walk to get under the pointer; further, he leaps for it
+GRAB_SURE_SIDE = 4            # held right above him (this close to over his body)...
+GRAB_HOLD = 450               # ...for this long (ms): he always goes for it
 DANGLE_FOR = (15_000, 45_000) # how long he hangs on, unless you shake him off
 SHAKE_FLIPS = 4               # quick back-and-forths within SHAKE_MS shake him off
 SHAKE_MS = 1300
@@ -266,6 +269,7 @@ AWAY = 10 * 60_000            # no pointer movement or prompt for this long: you
 PRESENT = 90_000              # reminders only come while you've done something this recently
 REMIND_LOUD = 120_000         # a reminder's first two minutes are loud; then he just holds it up
 REMINDERS = ("remind_water", "remind_break")
+NEVER_GRAB = REMINDERS + ("settings", "grab", "duck", "attention", "held", "fall")
 REMINDER_BITS = {"water_bubble", "break_bubble", "done_button", "done_button_pressed"}
 BUBBLE_AT = (23, -16)         # a reminder's bubble: over his right shoulder, clear of hats and bottles
 DONE_AT = (28, -1)            # its Done button: under the bubble, clear of the bottle at his side
@@ -1368,6 +1372,7 @@ class ClawdPet(QWidget):
         self._swing = self._swing_v = 0.0      # his swing under the pointer (radians, rad/s)
         self._linger = 0.0                     # how long the pointer has hung around above him
         self._grab_cool = 0.0
+        self._sure_armed = True                # a pointer held right above him gets grabbed
         self._morning = None                   # the day he last had his morning coffee
         self._new_year = None                  # the year he last saw in
         self._input_at = 0.0                   # when you last moved the pointer or sent a prompt
@@ -3053,12 +3058,26 @@ class ClawdPet(QWidget):
         return left - side * s <= x <= right + side * s and top - GRAB_REACH * s <= y <= top - 2 * s
 
     def _maybe_grab(self, dt):
-        """A pointer hanging around just above him while he's idle: now and
-        then he jumps up and grabs it (one chance each time it comes by)."""
+        """Held right above him, the pointer always gets grabbed (whatever he's
+        up to on his own). Hanging around near him, it often does: one chance
+        each time it comes by, and not again for a while."""
         c = self.cursor
-        if (self.action not in GRAB_WHILE or self.manual or self.airborne or self.scripted or self.lift
-                or self.offscreen or not self.prefs["grab"] or not self.sp.dangle_drawn or self.prefs["quiet"]
-                or c is None or self.now < self._grab_cool or self.now - c[2] > 5000
+        if (c is None or self.airborne or self.scripted or self.lift or self.offscreen or self.dragging
+                or not self.prefs["grab"] or not self.sp.dangle_drawn):
+            self._linger = 0.0
+            return
+        if self._can_reach(c[0], c[1], GRAB_SURE_SIDE):
+            if self.manual or self.action in NEVER_GRAB or not self._sure_armed:
+                self._linger = 0.0
+                return
+            self._linger = max(self._linger, 0.0) + dt
+            if self._linger >= GRAB_HOLD:
+                self._linger = 0.0
+                self.start("grab")
+            return
+        self._sure_armed = True                    # moved off: next time it's held above him, he grabs
+        if (self.action not in GRAB_WHILE or self.manual or self.prefs["quiet"]
+                or self.now < self._grab_cool or self.now - c[2] > 5000
                 or not self._can_reach(c[0], c[1], GRAB_SIDE)):
             self._linger = 0.0
             return
@@ -3077,11 +3096,11 @@ class ClawdPet(QWidget):
         yield from self._come_back()
         c = self.cursor
         left, right = self.box_span()
-        if not self._can_reach(c[0], c[1]):     # get under it, if it's along what he stands on
+        if not self._can_reach(c[0], c[1]):     # a few steps to get under it; any further, he just leaps
             room_l, room_r = self._room()
             w = right - left
             target = min(max(c[0] - w / 2, left - room_l + 10), right + room_r - w - 10)
-            if abs(target - left) > 30:
+            if 30 < abs(target - left) <= GRAB_WALK * self.scale:
                 yield from self._walk_to(target)
         self.show_frame("jump", 1)                  # crouch
         yield 160
@@ -3094,7 +3113,9 @@ class ClawdPet(QWidget):
         x0, y0 = self.x, self.y
         catch = ("anim", "dangle", STRAIGHT, False)
         tx, ty = self._pointer_spot(catch)
-        dur = 320 + min(600.0, ((tx - x0) ** 2 + (ty - y0) ** 2) ** 0.5 * 0.9)
+        dist = ((tx - x0) ** 2 + (ty - y0) ** 2) ** 0.5
+        dur = 320 + min(700.0, dist * 0.9)
+        arc = 6 * self.scale + 0.12 * dist            # a long leap arcs higher
         self.show_frame("cheer", 0)
         t = 0.0
         while t < dur:
@@ -3104,7 +3125,7 @@ class ClawdPet(QWidget):
             tx, ty = self._pointer_spot(catch)
             e = u * u * (3 - 2 * u)
             self.x = x0 + (tx - x0) * e
-            self.y = y0 + (ty - y0) * e - 6 * self.scale * 4 * u * (1 - u)
+            self.y = y0 + (ty - y0) * e - arc * 4 * u * (1 - u)
 
     def _dangle(self):
         self._dangling, self._release = True, False
@@ -3180,6 +3201,7 @@ class ClawdPet(QWidget):
     def _let_go(self, vx, vy):
         """Off the pointer: he drops, carrying its swing, and lands."""
         self._dangling = False
+        self._sure_armed = False                   # not straight back on: wait for it to move off
         self._grab_cool = self.now + GRAB_COOLDOWN * (0.35 if self.prefs["activity"] == "lively" else 1)
         limit = 300 * self.scale
         self.vx = max(-limit, min(limit, vx))

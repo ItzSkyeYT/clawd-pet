@@ -1876,6 +1876,68 @@ class GrabThePointer(unittest.TestCase):
         run_ms(self.pet, 500)
         self.assertEqual(self.pet.action, "grab")
 
+    def hold_above(self, ms, up=40):
+        x, y = self.above_him(up)
+        self.pet.cursor_moved(x, y)
+        run_ms(self.pet, ms, until=lambda: self.pet.action == "grab")
+        return x, y
+
+    def test_held_right_above_him_he_always_grabs_it(self):
+        cp.GRAB_CHANCE = 0.0                                  # no luck involved
+        for k in range(5):
+            self.pet._grab_cool = self.pet.now + 10 ** 9      # nor any cooldown
+            self.pet.cursor = (self.pet.cursor[0], self.pet.cursor[1], -10 ** 6) if self.pet.cursor else None
+            self.hold_above(700)
+            self.assertEqual(self.pet.action, "grab", k)
+            self.assertTrue(run_ms(self.pet, 3000, until=lambda: self.pet._dangling))
+            self.pet._release = True
+            self.assertTrue(run_ms(self.pet, 10_000, until=lambda: self.pet.action not in ("grab", "fall")))
+            self.pet.cursor_moved(10, 10)                    # away, and back again next time
+            run_ms(self.pet, 100)
+
+    def test_a_held_pointer_even_when_it_stopped_moving_long_ago(self):
+        x, y = self.above_him()
+        self.pet.cursor = (x, y, self.pet.now - 60_000)       # parked there a minute ago
+        run_ms(self.pet, 700, until=lambda: self.pet.action == "grab")
+        self.assertEqual(self.pet.action, "grab")
+
+    def test_it_wakes_him_up(self):
+        self.pet.start("sleep")
+        run_ms(self.pet, 500)
+        self.hold_above(700)
+        self.assertEqual(self.pet.action, "grab")
+
+    def test_just_passing_over_him_is_not_holding_it(self):
+        cp.GRAB_CHANCE = 0.0
+        x, y = self.above_him()
+        for dx in range(-300, 300, 60):                     # a quick sweep across above him
+            self.pet.cursor_moved(x + dx, y)
+            self.pet.advance(16)
+        self.assertNotEqual(self.pet.action, "grab")
+
+    def test_after_letting_go_he_waits_for_you_to_move_off_and_back(self):
+        self.hold_above(700)
+        self.assertTrue(run_ms(self.pet, 3000, until=lambda: self.pet._dangling))
+        self.pet._release = True
+        self.assertTrue(run_ms(self.pet, 10_000, until=lambda: self.pet.action not in ("grab", "fall")))
+        self.hold_above(2000)                                 # still hovering over him: no
+        self.assertNotEqual(self.pet.action, "grab")
+        self.pet.cursor_moved(10, 10)
+        run_ms(self.pet, 100)
+        self.hold_above(700)                                  # away and back: yes
+        self.assertEqual(self.pet.action, "grab")
+
+    def test_not_during_a_reminder_or_with_grabbing_off(self):
+        self.pet.play("remind_water")
+        run_ms(self.pet, 100)
+        self.hold_above(1500)
+        self.assertEqual(self.pet.action, "remind_water")
+        self.pet.reminding = None
+        self.pet.start("idle")
+        self.pet.prefs["grab"] = False
+        self.hold_above(1500)
+        self.assertNotEqual(self.pet.action, "grab")
+
     def test_he_goes_for_a_pointer_off_to_his_side(self):
         cp.GRAB_CHANCE = 1.0
         left, right = self.pet.box_span()
@@ -1901,11 +1963,23 @@ class GrabThePointer(unittest.TestCase):
                 break
         self.assertEqual(self.pet.action, "grab")
 
-    def test_not_when_turned_off_or_in_quiet_mode(self):
+    def test_quiet_mode_stops_him_going_for_it_but_not_a_held_one(self):
         cp.GRAB_CHANCE = 1.0
-        for grab, quiet in ((False, False), (True, True)):
-            self.pet.prefs["grab"], self.pet.prefs["quiet"] = grab, quiet
-            x, y = self.above_him()
+        self.pet.prefs["quiet"] = True
+        left, right = self.pet.box_span()
+        x, y = int(right + 25 * self.pet.scale), int(self.pet.y + self.pet.home_px.y() - 60)
+        for i in range(150):                                   # nearby, off to one side: no
+            self.pet.cursor_moved(x + i % 3, y)
+            self.pet.advance(16)
+        self.assertNotEqual(self.pet.action, "grab")
+        self.hold_above(700)                                  # held right above him: yes
+        self.assertEqual(self.pet.action, "grab")
+
+    def test_not_at_all_with_grabbing_off(self):
+        cp.GRAB_CHANCE = 1.0
+        self.pet.prefs["grab"] = False
+        for up in (40, 60):
+            x, y = self.above_him(up)
             for i in range(150):
                 self.pet.cursor_moved(x + i % 3, y)
                 self.pet.advance(16)
@@ -1919,10 +1993,11 @@ class GrabThePointer(unittest.TestCase):
 
     def test_from_the_menu_he_goes_to_the_pointer_wherever_it_is(self):
         geo = self.pet.screen_geometry()
+        self.pet.set_box_left(geo.left() + 100)
         px, py = geo.left() + geo.width() - 300, geo.top() + 200
         self.pet.cursor_moved(px, py)
         self.pet.play("grab")
-        self.assertTrue(run_ms(self.pet, 20_000, until=lambda: self.pet._dangling))
+        self.assertTrue(run_ms(self.pet, 3000, until=lambda: self.pet._dangling))   # a leap, not a trek
         self.assertEqual(self.hands(), (px + self.pet.grip_offset[0], py + self.pet.grip_offset[1]))
 
     def test_the_grip_follows_the_cursor_size(self):

@@ -59,10 +59,11 @@ to what Claude Code is doing.
   celebrations); Claude Code working or needing you still shows
 - **Drag**: pick him up; let go and he falls (throw him and he bounces)
 - **Stroke him** with the pointer (back and forth): hearts, happy eyes, eventually a dance
-- **He grabs the pointer**: let it hang around near him (above him, or off to one side;
-  he walks under it) and he'll usually jump up, grab the arrow's tail and dangle from it,
-  swinging as you move and kicking his legs. He breaks off a walk or a dance for it; 45 s
-  between grabs (15 s when lively). He lets go when he's had enough (hanging by one hand first) or when you shake the
+- **He grabs the pointer**: hold it right above him for half a second and he always jumps
+  up, grabs the arrow's tail and dangles from it, swinging as you move and kicking his
+  legs (from anything but a reminder, his settings or a fall; after he lets go, move the
+  pointer off and back for another go). Left hanging around near him (off to one side,
+  he walks under it) it gets grabbed now and then: 80%, 45 s apart (15 s when lively). He lets go when he's had enough (hanging by one hand first) or when you shake the
   pointer back and forth, and drops with the swing you gave him. Never over the tip, so
   your clicks always go through. Play → "Grab the pointer" sends him after it wherever it
   is; the setting is under Reactions
