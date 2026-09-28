@@ -782,6 +782,7 @@ class ClawdPet(QWidget):
         self.front = None              # the cloud he sits in, drawn over his legs
         self.frame = ("pose", "idle", False)
         self.action = None
+        self.manual = False
         self.script = None
         self.wait = 0.0
         self._press = None
@@ -976,7 +977,10 @@ class ClawdPet(QWidget):
 
     # ── Driving behaviours ────────────────────────────────────────
 
-    def start(self, action, **kw):
+    def start(self, action, manual=False, **kw):
+        """Switch to a behaviour. `manual` marks one you asked for (menu, click,
+        socket, petting): Claude Code events wait for it to finish."""
+        self.manual = manual
         self._leave_cloud()                     # interrupted mid-scene: drop the props
         self.layers = {}
         self.vx = 0.0 if not self.airborne else self.vx
@@ -1132,7 +1136,7 @@ class ClawdPet(QWidget):
             if not isinstance(msg, dict):
                 continue
             if msg.get("cmd") == "play" and msg.get("action") in PLAYABLE:
-                self.start(msg["action"])
+                self.start(msg["action"], manual=True)
             elif msg.get("cmd") == "icons":
                 icons = [[n, r.x(), r.y(), r.width(), r.height(), d] for n, r, d in self.icon_source()]
                 conn.write((json.dumps(icons) + "\n").encode())
@@ -1187,10 +1191,12 @@ class ClawdPet(QWidget):
         return mode
 
     def _react(self):
-        """Switch to what Claude Code needs now, unless he's in the middle of something physical."""
-        if (self.dragging or self.airborne or self.scripted
+        """Switch to what Claude Code needs now, unless he's doing something you
+        asked for or is in the middle of something physical; either way _next()
+        catches up the moment he's done."""
+        if (self.manual or self.dragging or self.airborne or self.scripted
                 or self.action in ("held", "fall", "climb", "leap", "visit", "read")):
-            return                                  # _next() catches up when he's back on his feet
+            return
         mode = self.claude_mode()
         if mode == "attention" and self.action != "attention":
             self.start("attention")
@@ -1236,7 +1242,7 @@ class ClawdPet(QWidget):
                 self.pose("happy")
             if self._pet_ms > 3500 and self.action == "idle":
                 self._pet_ms = 0.0
-                self.start("dance")                 # he loves it
+                self.start("dance", manual=True)    # he loves it
         else:
             self._pet_ms = max(0.0, self._pet_ms - dt)
             if self._was_petting and self.action in ("idle", "visit") and self.frame == ("pose", "happy", False):
@@ -2040,7 +2046,7 @@ class ClawdPet(QWidget):
             waking = self.action == "sleep"
             kind = self.click_kind()
             if self.action not in ("work", "attention"):
-                self.start("jump_happy")
+                self.start("jump_happy", manual=True)
             if not waking:                         # a click on a sleeping Clawd just wakes him
                 self.launch_claude_code(kind)
         self._press = None
@@ -2066,7 +2072,8 @@ class ClawdPet(QWidget):
         m.addSeparator()
         play = m.addMenu("Play")
         for key in ACTIONS + BETWEEN_SCREENS:
-            play.addAction(LABELS[key]).triggered.connect(lambda _=False, k=key: self.start(k))
+            play.addAction(LABELS[key]).triggered.connect(
+                lambda _=False, k=key: self.start(k, manual=True))
         size = m.addMenu("Size")
         group = QActionGroup(size)
         for label, s in SCALES.items():

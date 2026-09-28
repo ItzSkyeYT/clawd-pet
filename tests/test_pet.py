@@ -411,6 +411,25 @@ class ClaudeHooks(unittest.TestCase):
         self.assertFalse(any(q["kind"] == "bubble" for q in self.pet.particles))
         self.assertEqual(self.pet.click_link(), cp.CLAUDE_LINKS["continue"])
 
+    def test_something_you_asked_for_finishes_before_claude_code_gets_him(self):
+        self.pet.claude_event({"event": "UserPromptSubmit", "session": "a"})
+        run_ms(self.pet, 500)
+        self.assertEqual(self.pet.action, "work")
+        self.pet.start("sparkler", manual=True)          # Play -> Sparkler, mid-task
+        for _ in range(30):                              # Claude Code keeps busy meanwhile
+            self.pet.claude_event({"event": "PreToolUse", "session": "a", "tool": "Bash"})
+            run_ms(self.pet, 100)
+        self.pet.claude_event({"event": "PermissionRequest", "session": "a", "tool": "Bash"})
+        run_ms(self.pet, 300)
+        self.assertEqual(self.pet.action, "sparkler")    # not cut short
+        self.assertTrue(run_ms(self.pet, 10_000, until=lambda: self.pet.action != "sparkler"))
+        self.assertEqual(self.pet.action, "attention")   # then straight to what Claude Code needs
+
+    def test_his_own_ideas_still_give_way_to_claude_code(self):
+        self.pet.start("dance")                          # picked by himself
+        self.pet.claude_event({"event": "UserPromptSubmit", "session": "a"})
+        self.assertEqual(self.pet.action, "work")
+
     def test_an_idle_reminder_after_the_turn_does_not_nag(self):
         self.pet.claude_event({"event": "Notification", "session": "a", "kind": "idle_prompt"})
         run_ms(self.pet, 500)
@@ -454,6 +473,7 @@ class ClaudeHooks(unittest.TestCase):
             return got.endswith(b"\n")
         self.assertTrue(self.pump(answered))
         self.assertEqual(json.loads(got)["action"], "wave")
+        self.assertTrue(self.pet.manual)                 # a played action counts as asked for
         c.close()
 
 

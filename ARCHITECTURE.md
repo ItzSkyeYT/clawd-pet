@@ -51,8 +51,10 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
   waiting (PermissionRequest, permission notifications) → waves with a "!" bubble and
   a click opens `claude://code/needs-input`; Stop → he celebrates (sparkler after long
   work). Stale sessions expire (15 min busy, 30 min waiting)
-- Claude Code events only interrupt what he's doing when he's on his feet; climbs,
-  leaps, icon visits and falls finish first
+- Claude Code events only interrupt his own ideas, and only when he's on his feet.
+  Anything you asked for (menu Play, a click, socket play, petting) finishes first
+  (`start(..., manual=True)`), as do climbs, leaps, icon visits, reading and falls;
+  `_next()` then goes straight to what Claude Code needs
 
 ## Pointer
 - KDE Wayland: `start_kwin_cursor_feed()` registers `org.clawdpet.Pet` on D-Bus and

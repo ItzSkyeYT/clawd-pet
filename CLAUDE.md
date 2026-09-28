@@ -22,6 +22,8 @@ python tools/install_hooks.py --remove   # takes them out again
 `clawd_hook.py` forwards event, tool and session names (never tool inputs) over
 `$XDG_RUNTIME_DIR/clawd-pet.sock`. The socket also takes `{"cmd": "status"}`,
 `{"cmd": "icons"}` and `{"cmd": "play", "action": "climb"}` (handy for testing).
+Anything you ask for (menu, click, socket play, petting) finishes before he goes back
+to what Claude Code is doing.
 
 ## Controls
 - **Left-click**: the Code tab of the Claude app (`claude://code/continue?session=last`,
