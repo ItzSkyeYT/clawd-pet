@@ -356,6 +356,104 @@ class Ladder(unittest.TestCase):
         self.assertTrue(self.pet.ladder.windowFlags() & Qt.WindowType.WindowTransparentForInput)
 
 
+class OnWindows(unittest.TestCase):
+    """Windows as KWin reports them: [x, y, w, h, stacking, fullscreen, active, output, id]."""
+
+    def setUp(self):
+        random.seed(21)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def stand_on(self, box_left, feet):
+        self.pet.set_box_left(box_left)
+        self.pet.y = feet - self.pet.home_px.y() - self.pet.ih * self.pet.scale
+        self.pet.start("idle")
+
+    def feet(self):
+        return self.pet._feet()
+
+    def test_dropped_above_a_window_he_lands_on_it(self):
+        self.pet.windows_changed([[400, 900, 600, 400, 3, 0, 1, "eDP-1", "a"]])
+        self.stand_on(600, 500)
+        self.pet.drop()
+        run_ms(self.pet, 5000, until=lambda: self.pet.action == "idle")
+        self.assertAlmostEqual(self.feet(), 900, delta=1)
+
+    def test_walking_off_the_edge_drops_him_to_the_floor(self):
+        self.pet.windows_changed([[400, 900, 600, 400, 3, 0, 1, "eDP-1", "a"]])
+        self.stand_on(800, 900)
+        self.pet.start("walk", target=1200)
+        run_ms(self.pet, 20_000, until=lambda: self.pet.action == "idle" and not self.pet.airborne)
+        self.assertAlmostEqual(self.feet(), 1530, delta=1)
+
+    def test_he_rides_along_when_you_move_the_window(self):
+        self.pet.windows_changed([[400, 900, 600, 400, 3, 0, 1, "eDP-1", "a"]])
+        self.stand_on(600, 900)
+        run_ms(self.pet, 200)
+        left = self.pet.box_span()[0]
+        self.pet.windows_changed([[500, 850, 600, 400, 3, 0, 1, "eDP-1", "a"]])
+        run_ms(self.pet, 200)
+        self.assertAlmostEqual(self.pet.box_span()[0], left + 100, delta=1)
+        self.assertAlmostEqual(self.feet(), 850, delta=1)
+
+    def test_closing_the_window_under_him_drops_him(self):
+        self.pet.windows_changed([[400, 900, 600, 400, 3, 0, 1, "eDP-1", "a"]])
+        self.stand_on(600, 900)
+        run_ms(self.pet, 200)
+        self.pet.windows_changed([])
+        run_ms(self.pet, 5000, until=lambda: self.pet.action == "idle" and not self.pet.airborne)
+        self.assertAlmostEqual(self.feet(), 1530, delta=1)
+
+    def test_an_edge_hidden_behind_another_window_is_not_a_ledge(self):
+        # b sits on top of a, covering the middle of a's top edge
+        self.pet.windows_changed([[400, 900, 800, 400, 2, 0, 0, "eDP-1", "a"],
+                                  [650, 800, 300, 400, 5, 0, 1, "eDP-1", "b"]])
+        self.stand_on(700, 700)
+        self.pet.drop()
+        run_ms(self.pet, 5000, until=lambda: self.pet.action == "idle")
+        self.assertAlmostEqual(self.feet(), 800, delta=1)          # lands on b, not a's hidden edge
+
+    def test_he_hops_up_onto_a_nearby_window(self):
+        self.pet.windows_changed([[700, 1200, 700, 300, 3, 0, 1, "eDP-1", "a"]])
+        self.stand_on(500, 1530)
+        self.pet.start("perch_window")
+        run_ms(self.pet, 30_000, until=lambda: self.pet.action != "perch_window")
+        self.assertAlmostEqual(self.feet(), 1200, delta=1)
+        left, right = self.pet.box_span()
+        self.assertTrue(700 <= (left + right) / 2 <= 1400)
+
+    def test_on_a_window_he_picks_things_that_fit_up_there(self):
+        self.pet.windows_changed([[400, 900, 600, 400, 3, 0, 1, "eDP-1", "a"]])
+        self.stand_on(600, 900)
+        picks = {self.pet._pick_action() for _ in range(300)}
+        self.assertFalse(picks & {"race", "cloud", "lurk", "climb", "leap", "visit", "read"}, picks)
+        self.assertIn("hop_down", picks)
+
+    def test_he_ducks_out_of_fullscreen_on_his_screen_and_comes_back(self):
+        self.stand_on(600, 1530)
+        self.pet.windows_changed([[0, 330, 1920, 1200, 9, 1, 1, "eDP-1", "video"]])
+        run_ms(self.pet, 3000)
+        self.assertTrue(self.pet.ducked)
+        self.pet.windows_changed([])
+        run_ms(self.pet, 5000, until=lambda: not self.pet.ducked and self.pet.action == "idle")
+        self.assertFalse(self.pet.ducked)
+        self.assertAlmostEqual(self.feet(), 1530, delta=1)
+
+    def test_fullscreen_on_the_other_screen_leaves_him_be(self):
+        self.stand_on(600, 1530)
+        self.pet.windows_changed([[1920, 0, 1920, 1080, 9, 1, 1, "HDMI-A-1", "video"]])
+        run_ms(self.pet, 3000)
+        self.assertFalse(self.pet.ducked)
+
+    def test_the_kwin_script_reports_windows(self):
+        js = cp.kwin_desktop_script()
+        self.assertIn("windowList", js)
+        self.assertIn('"Windows"', js)
+
+
 class ClaudeHooks(unittest.TestCase):
     def setUp(self):
         random.seed(5)
@@ -626,7 +724,7 @@ class CursorReactions(unittest.TestCase):
                 self.assertNotEqual(rows[ey][ex], rows[ey][ex - 1])   # ink, not body
 
     def test_kwin_script_reports_to_our_service(self):
-        js = cp.kwin_cursor_script()
+        js = cp.kwin_desktop_script()
         self.assertIn("cursorPosChanged", js)
         self.assertIn(cp.DBUS_SERVICE, js)
 

@@ -75,8 +75,10 @@ LABELS = {
     "visit": "Check out a desktop icon", "read": "Read something from a desktop folder",
     "work": "Typing (Claude Code working)", "attention": "Calling you over (a permission)",
     "celebrate": "Celebrating (Claude Code done)",
+    "perch_window": "Hop up onto a window", "hop_down": "Hop down from a window",
 }
-AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["visit", "read"]
+ON_A_WINDOW = ["walk", "wave", "jump", "jump_happy", "dance", "laptop", "sparkler", "sleep"]
+AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["perch_window", "hop_down", "visit", "read"]
 CLAUDE_PREVIEWS = ["work", "attention", "celebrate"]
 PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + ["idle"])
 
@@ -620,37 +622,79 @@ def open_claude_web():
 # window, so on KDE we ask the compositor itself: a tiny KWin script reports
 # the pointer position to us over D-Bus.
 
-def kwin_cursor_script():
+def kwin_desktop_script():
+    """A KWin script reporting the pointer and the windows (position, size,
+    stacking, fullscreen, active, screen, id; never titles) over D-Bus."""
     return f"""
+const SERVICE = "{DBUS_SERVICE}";
 let last = {{x: -1e6, y: -1e6}};
-function send() {{
+function sendCursor() {{
     const p = workspace.cursorPos;
     if (Math.abs(p.x - last.x) + Math.abs(p.y - last.y) < 4) return;
     last = {{x: p.x, y: p.y}};
-    callDBus("{DBUS_SERVICE}", "/Pet", "{DBUS_SERVICE}", "Cursor", p.x + "," + p.y);
+    callDBus(SERVICE, "/Pet", SERVICE, "Cursor", p.x + "," + p.y);
 }}
-workspace.cursorPosChanged.connect(send);
-send();
+function onThisDesktop(w) {{
+    if (w.onAllDesktops) return true;
+    try {{
+        for (const d of w.desktops) if (d.id === workspace.currentDesktop.id) return true;
+        return false;
+    }} catch (e) {{ return true; }}
+}}
+function sendWindows() {{
+    const out = [];
+    for (const w of workspace.windowList()) {{
+        if (String(w.resourceClass) === "clawd-pet") continue;          // himself and his ladder
+        if (!(w.normalWindow || w.dialog) || w.minimized || w.hidden || !onThisDesktop(w)) continue;
+        const g = w.frameGeometry;
+        out.push([Math.round(g.x), Math.round(g.y), Math.round(g.width), Math.round(g.height),
+                  w.stackingOrder, w.fullScreen ? 1 : 0, w.active ? 1 : 0,
+                  w.output ? String(w.output.name) : "", String(w.internalId)]);
+    }}
+    callDBus(SERVICE, "/Pet", SERVICE, "Windows", JSON.stringify(out));
+}}
+function watch(w) {{
+    w.frameGeometryChanged.connect(sendWindows);
+    w.fullScreenChanged.connect(sendWindows);
+    w.minimizedChanged.connect(sendWindows);
+}}
+for (const w of workspace.windowList()) watch(w);
+workspace.windowAdded.connect(function (w) {{ watch(w); sendWindows(); }});
+workspace.windowRemoved.connect(sendWindows);
+workspace.windowActivated.connect(sendWindows);
+workspace.currentDesktopChanged.connect(sendWindows);
+workspace.cursorPosChanged.connect(sendCursor);
+sendCursor();
+sendWindows();
 """
 
 
 @pyqtClassInfo("D-Bus Interface", DBUS_SERVICE)
-class CursorFeed(QObject):
-    def __init__(self, callback):
+class DesktopFeed(QObject):
+    def __init__(self, on_cursor, on_windows):
         super().__init__()
-        self._callback = callback
+        self._on_cursor, self._on_windows = on_cursor, on_windows
 
     @pyqtSlot(str)
     def Cursor(self, pos):                       # noqa: N802 (D-Bus method name)
         try:
             x, y = pos.split(",")
-            self._callback(int(float(x)), int(float(y)))
+            self._on_cursor(int(float(x)), int(float(y)))
         except ValueError:
             pass
 
+    @pyqtSlot(str)
+    def Windows(self, data):                     # noqa: N802
+        try:
+            rows = json.loads(data)
+        except ValueError:
+            return
+        if isinstance(rows, list):
+            self._on_windows(rows)
 
-def start_kwin_cursor_feed(callback):
-    """Start the KWin cursor feed; returns it, or None if this isn't KDE Wayland."""
+
+def start_kwin_feed(on_cursor, on_windows):
+    """Start the KWin feed; returns it, or None if this isn't KDE Wayland."""
     if not (os.environ.get("WAYLAND_DISPLAY") and "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "")):
         return None
     try:
@@ -660,12 +704,12 @@ def start_kwin_cursor_feed(callback):
     bus = QDBusConnection.sessionBus()
     if not bus.isConnected() or not bus.registerService(DBUS_SERVICE):
         return None
-    feed = CursorFeed(callback)
+    feed = DesktopFeed(on_cursor, on_windows)
     if not bus.registerObject("/Pet", feed, QDBusConnection.RegisterOption.ExportAllSlots):
         return None
-    path = os.path.join(runtime_dir(), "clawd-pet-cursor.js")
+    path = os.path.join(runtime_dir(), "clawd-pet-desktop.js")
     with open(path, "w") as f:
-        f.write(kwin_cursor_script())
+        f.write(kwin_desktop_script())
     kwin = QDBusInterface("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", bus)
     if not kwin.isValid():
         return None
@@ -677,7 +721,7 @@ def start_kwin_cursor_feed(callback):
     return feed
 
 
-def stop_kwin_cursor_feed():
+def stop_kwin_feed():
     try:
         from PyQt6.QtDBus import QDBusConnection, QDBusInterface
     except ImportError:
@@ -945,6 +989,9 @@ class ClawdPet(QWidget):
         self._mask = None
         self.ladder = Prop()
         self.icon_source = desktop_icons
+        self.window_list = []          # other apps' windows, from KWin (dicts)
+        self.standing_on = None        # id of the window whose top he's standing on
+        self.ducked = False            # hidden while something is fullscreen on his screen
 
         self.sessions = {}             # Claude Code sessions: state, since, seen
         self.celebrate = None          # ms of work to celebrate once he's free
@@ -1031,9 +1078,85 @@ class ClawdPet(QWidget):
     def set_box_left(self, left):
         self.x = left - self.home_px.x()
 
+    def _surfaces(self):
+        """What he can stand on: each screen's floor, and the visible parts of
+        window top edges that have room above them for him. (y, x0, x1, id)
+        Worked out at most once per tick."""
+        key = (self.now, id(self.window_list), self.scale)
+        if getattr(self, "_surfaces_key", None) != key:
+            self._surfaces_key, self._surfaces_cache = key, self._find_surfaces()
+        return self._surfaces_cache
+
+    def _find_surfaces(self):
+        s = self.scale
+        areas = screen_areas()
+        out = [(a.top() + a.height(), a.left(), a.left() + a.width(), None) for a in areas]
+        wins = sorted(self.window_list, key=lambda w: -w["stack"])          # topmost first
+        for i, w in enumerate(wins):
+            if w["fs"]:
+                continue
+            y, spans = w["y"], [(w["x"], w["x"] + w["w"])]
+            for above in wins[:i]:                 # a window in front hides that stretch of edge
+                if above["y"] <= y < above["y"] + above["h"]:
+                    a0, a1 = above["x"], above["x"] + above["w"]
+                    spans = [part for x0, x1 in spans
+                             for part in ((x0, min(x1, a0)), (max(x0, a1), x1)) if part[1] > part[0]]
+            for x0, x1 in spans:
+                for a in areas:
+                    if a.top() + (self.ih + 4) * s <= y < a.top() + a.height() - 4 * s:
+                        c0, c1 = max(x0, a.left()), min(x1, a.left() + a.width())
+                        if c1 - c0 >= self.iw * s * 0.6:
+                            out.append((y, c0, c1, w["id"]))
+        return out
+
+    def _support(self, feet=None):
+        """The surface under his middle at or below `feet` (default: where his feet are)."""
+        feet = self._feet() if feet is None else feet
+        cx = sum(self.box_span()) / 2
+        best = None
+        for surface in self._surfaces():
+            y, x0, x1, _ = surface
+            if x0 <= cx < x1 and y >= feet - 2 and (best is None or y < best[0]):
+                best = surface
+        return best
+
     def ground_y(self):
-        geo = self.screen_geometry()
-        return geo.top() + geo.height() - self.home_px.y() - self.ih * self.scale
+        sup = self._support()
+        if sup is not None:
+            floor = sup[0]
+        else:                                      # in a gap between screens: the nearest floor
+            geo = self.screen_geometry()
+            floor = geo.top() + geo.height()
+        return floor - self.home_px.y() - self.ih * self.scale
+
+    def windows_changed(self, rows):
+        """KWin's window list changed: ride along with the window he's on, and
+        duck out of the way if something goes fullscreen on his screen."""
+        new = []
+        for r in rows:
+            try:
+                x, y, w, h, stack, fs, active, output, wid = r[:9]
+                new.append({"x": int(x), "y": int(y), "w": int(w), "h": int(h), "stack": int(stack),
+                            "fs": bool(fs), "active": bool(active), "output": str(output), "id": str(wid)})
+            except (ValueError, TypeError):
+                continue
+        if self.standing_on and not (self.airborne or self.dragging or self.scripted):
+            old = next((w for w in self.window_list if w["id"] == self.standing_on), None)
+            now = next((w for w in new if w["id"] == self.standing_on), None)
+            if old and now:
+                self.x += now["x"] - old["x"]
+                self.y += now["y"] - old["y"]
+        self.window_list = new
+        if self._fullscreen_here() and self.action != "duck" and not self.dragging:
+            self.start("duck")
+
+    def _screen_name(self):
+        screen = QApplication.screenAt(QPoint(int(sum(self.box_span()) / 2), int(self._mid())))
+        return screen.name() if screen is not None else None
+
+    def _fullscreen_here(self, name=None):
+        name = name or self._screen_name()
+        return any(w["fs"] and (w["output"] == name or not w["output"]) for w in self.window_list)
 
     def _limits(self):
         geo = self.screen_geometry()
@@ -1050,10 +1173,20 @@ class ClawdPet(QWidget):
         return max(0, left) * self.scale, max(0, a.w - left - self.iw) * self.scale
 
     def _room(self):
-        """Space left and right of him on this screen."""
-        geo = self.screen_geometry()
+        """Space left and right of him on what he's standing on (a window or the screen)."""
         left, right = self.box_span()
+        on = self._window_under()
+        if on is not None:
+            return left - on[1], on[2] - right
+        geo = self.screen_geometry()
         return left - geo.left(), geo.left() + geo.width() - right
+
+    def _window_under(self):
+        """The window top he's standing on, as a surface, or None."""
+        sup = self._support()
+        if sup is not None and sup[3] is not None and abs(sup[0] - self._feet()) < 2:
+            return sup
+        return None
 
     def _reach(self):
         """Like _room, but a neighbouring screen that carries on at his height
@@ -1160,7 +1293,9 @@ class ClawdPet(QWidget):
 
     def _next(self):
         mode = self.claude_mode()
-        if mode == "attention":
+        if self._fullscreen_here():
+            self.start("duck")
+        elif mode == "attention":
             self.start("attention")
         elif mode == "busy":
             self.start("work")
@@ -1190,6 +1325,12 @@ class ClawdPet(QWidget):
 
     def _pick_action(self):
         weights = dict(WEIGHTS)
+        if self._window_under() is not None:       # up on a window: things that fit up there
+            weights = {k: v for k, v in weights.items() if k in ON_A_WINDOW}
+            weights["hop_down"] = 12
+            return random.choices(list(weights), weights=list(weights.values()))[0]
+        if self._window_target() is not None:
+            weights["perch_window"] = 10
         if self.now - self._last_activity > WIND_DOWN:
             weights["sleep"] = 25                 # nothing's happened for a while: nap time
         if self._lurk_side() is None:
@@ -1248,22 +1389,28 @@ class ClawdPet(QWidget):
         s = self.scale
         if self.airborne:
             self.vy = min(self.vy + GRAVITY * s * sec, 250 * s)
+            was = self._feet()
             self._slide(self.vx * sec, bounce=True)
             self.y += self.vy * sec
             ceiling = self.screen_geometry().top() - self.home_px.y()
             if self.y < ceiling:
                 self.y, self.vy = ceiling, abs(self.vy) * 0.3
-            if self.y >= self.ground_y():
-                self.y = self.ground_y()
+            # the first surface between where his feet were and where they are
+            below = self._support(was) if self.vy >= 0 else None
+            ground = (below[0] - self.home_px.y() - self.ih * s) if below else self.ground_y()
+            if self.y >= ground:
+                self.y = ground
                 self.airborne = False
                 self.vx = self.vy = 0.0
             return
         if self.vx:
             self._slide(self.vx * sec)
         if not self.offscreen:
+            sup = self._support()
+            self.standing_on = sup[3] if sup and abs(sup[0] - self._feet()) < 2 else None
             ground = self.ground_y()
             if self.y < ground - 1:
-                self.drop(self.vx * 0.6)         # walked off the edge of a higher screen
+                self.drop(self.vx * 0.6)         # walked off an edge
             elif self.y > ground:
                 self.y = ground                  # screens changed under him
 
@@ -1334,7 +1481,9 @@ class ClawdPet(QWidget):
         return {"action": self.action, "frame": list(self.frame), "box_left": round(left),
                 "feet": round(self._feet()), "screen": [geo.left(), geo.top(), geo.width(), geo.height()],
                 "mode": self.claude_mode(), "cursor": list(self.cursor) if self.cursor else None,
-                "ladder": self.ladder.isVisible(), "scale": self.scale}
+                "ladder": self.ladder.isVisible(), "scale": self.scale,
+                "windows": len(self.window_list), "standing_on": self.standing_on, "ducked": self.ducked,
+                "ledges": sum(1 for sf in self._surfaces() if sf[3] is not None)}
 
     def claude_event(self, msg):
         self.last_message = msg
@@ -1376,7 +1525,7 @@ class ClawdPet(QWidget):
         """Switch to what Claude Code needs now, unless he's doing something you
         asked for or is in the middle of something physical; either way _next()
         catches up the moment he's done."""
-        if self.manual or self.dragging or self.airborne or self.action in ("held", "fall"):
+        if self.manual or self.dragging or self.airborne or self.action in ("held", "fall", "duck"):
             return
         # Anything else he's doing is his own idea, so Claude Code comes first,
         # even halfway up a ladder: the props vanish and he drops to the floor.
@@ -1983,6 +2132,78 @@ class ClawdPet(QWidget):
         self.pose("idle")
         yield 400
 
+    def _window_target(self):
+        """A window top he could hop up onto: visible, above him, not too far."""
+        s = self.scale
+        feet = self._feet()
+        left, right = self.box_span()
+        cx = (left + right) / 2
+        best = None
+        for y, x0, x1, wid in self._surfaces():
+            if wid is None or not (feet - 9 * self.ih * s <= y <= feet - self.ih * s):
+                continue
+            spot = min(max(cx, x0 + self.iw * s * 0.6), x1 - self.iw * s * 0.6)
+            cost = abs(spot - cx) + (feet - y) / 2
+            if abs(spot - cx) <= 500 and (best is None or cost < best[0]):
+                best = (cost, y, spot)
+        return best
+
+    def _act_perch_window(self):
+        """Walk under a window and jump up onto its top edge."""
+        target = self._window_target()
+        if target is None:
+            return
+        _, top, spot = target
+        s = self.scale
+        box_left = spot - self.iw * s / 2
+        yield from self._walk_to(box_left)
+        self.pose("look_l" if random.random() < 0.5 else "look_r")
+        yield 500
+        self.show_frame("jump", 1)               # crouch
+        yield 140
+        self.show_frame("jump", 2)
+        yield from self._arc_to(box_left, top, 6 * s)
+        yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
+
+    def _act_hop_down(self):
+        """Hop off the window he's on, off whichever end is nearer."""
+        on = self._window_under()
+        if on is None:
+            return
+        room_l, room_r = self._room()
+        side = -1 if room_l < room_r else 1
+        self.show_frame("jump", 1)
+        yield 140
+        self.airborne = True
+        self.vx, self.vy = side * 40.0 * self.scale, -40.0 * self.scale
+        yield from self._fall()
+
+    def _act_duck(self):
+        """Something went fullscreen on his screen: drop out of sight until it's over."""
+        s = self.scale
+        screen = self._screen_name()             # remembered: he'll be out of sight in a moment
+        self.scripted = True
+        self.show_frame("jump", 1)
+        yield 120
+        home_y = self.y
+        for _ in range(8):                       # sink out of view
+            self.y += self.ih * s / 5
+            yield TICK_MS
+        self.ducked = True
+        self.hide()
+        while self._fullscreen_here(screen):
+            yield 400
+        self.ducked = False
+        self.show()
+        self.y = home_y + self.ih * s
+        self.show_frame("jump", 2)
+        for _ in range(8):                       # pop back up
+            self.y -= self.ih * s / 8
+            yield TICK_MS
+        self.y = home_y
+        self.scripted = False
+        yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
+
     def _act_held(self):
         self.show_frame("jump", 2)               # arms up, eyes wide
         while True:
@@ -2392,7 +2613,7 @@ class ClawdPet(QWidget):
         self.save()
         if self.settings is not None:
             self.settings.sync()
-        stop_kwin_cursor_feed()
+        stop_kwin_feed()
         cmd = restart_command()
         os.execve(cmd[0], cmd, env_for_restart())
 
@@ -2466,10 +2687,10 @@ def main():
     pet = ClawdPet(sprites, settings)
     pet.show()
     pet.listen()
-    feed = start_kwin_cursor_feed(pet.cursor_moved)
+    feed = start_kwin_feed(pet.cursor_moved, pet.windows_changed)
     pet._poll_cursor = feed is None
     if feed is not None:
-        app.aboutToQuit.connect(stop_kwin_cursor_feed)
+        app.aboutToQuit.connect(stop_kwin_feed)
 
     if QSystemTrayIcon.isSystemTrayAvailable():
         tray = QSystemTrayIcon(tray_icon(sprites), app)
