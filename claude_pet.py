@@ -276,9 +276,9 @@ LADDER_PALETTE = {"d": RAIL_DARK, "l": RAIL_LIGHT}
 
 CURSOR_NEAR = 70              # sprite pixels: how close the pointer must be for him to watch it
 CLIMB_JUMP = 20               # cells: a window's side ending this far above his feet, he jumps up to
-LEAP_GAP = 45                 # cells: the widest gap he'll jump between two windows...
-LEAP_UP = 30                  # ...to a window top at most this much higher...
-LEAP_DOWN = 120               # ...or this much lower
+LEAP_GAP = 80                 # cells: how far across he'll jump to another window top...
+LEAP_UP = 50                  # ...at most this much higher...
+LEAP_DOWN = 150               # ...or this much lower
 WINDOW_CLIMB = 1.3            # up a window's side a little quicker than a ladder
 GLANCE_MS = 1400
 ARMS_UP = ("anim", "jump", 2, False)   # a folder is being dragged over him: "for me?"
@@ -4214,49 +4214,60 @@ class ClawdPet(QWidget):
         return min(ys) if ys else None
 
     def _jump_target(self):
-        """From the window top he's on, another one to jump across to: (take-off
-        box left, landing box left, its top, its id). Not too far across, not
-        too much higher, in view, with room to land."""
+        """Another window top he can jump to from where he stands (a window top
+        or the floor): above, below or beside, in view, not too far. The
+        nearest spot on the nearest one: (landing box left, its top, its id)."""
+        s, wpx = self.scale, self.iw * self.scale
         on = self._window_under()
         if on is None:
             return None
-        _, x0, x1, wid = on
-        s, wpx = self.scale, self.iw * self.scale
-        feet, left = self._feet(), self.box_span()[0]
+        feet = self._feet()
+        left = self.box_span()[0]
+        room_l, room_r = self._room()
+        lo, hi = left - room_l, left + room_r              # where he can take off from
         best = None
-        for y, a, b, other in self._surfaces():
-            if other is None or other == wid or b - a < wpx + 4 * s:
+        for y, a, b, wid in self._surfaces():
+            if wid is None or wid == on[3] or b - a < wpx + 4 * s:
                 continue
-            if not (-LEAP_UP * s <= y - feet <= LEAP_DOWN * s):
+            rise = feet - y
+            if rise > LEAP_UP * s or -rise > LEAP_DOWN * s or abs(rise) < 2 * s:
                 continue
-            if a >= x1:                                    # off to the right
-                gap, launch, land = a - x1, x1 - wpx, a + 2 * s
-            elif b <= x0:                                  # off to the left
-                gap, launch, land = x0 - b, x0, b - wpx - 2 * s
-            else:
-                continue                                   # right above or below: hop, don't leap
-            if gap > LEAP_GAP * s or area_at(land + wpx / 2, y - 1) is None:
+            land = min(max(left, a + 2 * s), b - wpx - 2 * s)   # the nearest spot on it
+            takeoff = min(max(land, lo), hi)
+            across = abs(land - takeoff)
+            if across > LEAP_GAP * s or area_at(land + wpx / 2, y - 1) is None:
                 continue
-            cost = gap + abs(y - feet) / 2 + abs(launch - left) / 4
+            cost = across + abs(rise) / 2 + abs(takeoff - left) / 4
             if best is None or cost < best[0]:
-                best = (cost, launch, land, y, other)
+                best = (cost, land, y, wid)
         return best[1:] if best else None
 
     def _act_window_jump(self):
-        """To the edge of the window he's on, a crouch, and a leap across to the next one."""
+        """A crouch and a leap onto another window top: across a gap, up onto
+        one standing higher, or down onto one lower down. If it's a long way
+        across he walks nearer first."""
+        if self._window_under() is None:                     # from the floor: up onto one
+            yield from self._act_perch_window()
+            return
         target = self._jump_target()
         if target is None:
             return
-        launch, land, top, _ = target
-        s = self.scale
-        yield from self._walk_to(launch)
-        self.pose("look_r" if land > launch else "look_l")   # eyeing up the gap
+        land, top, wid = target
+        s, wpx = self.scale, self.iw * self.scale
+        left = self.box_span()[0]
+        room_l, room_r = self._room()
+        near = min(max(land, left - room_l), left + room_r)   # as near as what he's on goes
+        if abs(near - left) > 4 * s:
+            yield from self._walk_to(near)
+            target = self._jump_target() or target
+            land, top, wid = target
+        self.pose("look_r" if land > self.box_span()[0] else "look_l")   # eyeing it up
         yield 600
         self.show_frame("jump", 1)                          # crouch...
         yield 180
         self.show_frame("jump", 2)                          # ...and go
-        gap = abs(land - launch) - self.iw * s
-        yield from self._arc_to(land, top, 10 * s + 0.25 * max(gap, 0))
+        across = abs(land - self.box_span()[0])
+        yield from self._arc_to(land, top, 10 * s + 0.2 * across)
         yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
         self.pose("happy")
         yield 500

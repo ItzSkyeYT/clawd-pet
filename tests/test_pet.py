@@ -581,14 +581,18 @@ class JumpingBetweenWindows(unittest.TestCase):
         self.pet.start("idle")
         self.pet.advance(16)
 
-    def test_he_leaps_across_to_the_next_window(self):
-        self.pet.windows_changed([self.A, self.B])
-        self.stand_on(400, 1000)
-        self.assertEqual(self.pet.standing_on, "a")
+    def jump(self):
         self.pet.play("window_jump")
         seen = set()
         run_ms(self.pet, 20_000, until=lambda: seen.add(self.pet.frame[1]) or
                (self.pet.action != "window_jump" and not self.pet.airborne))
+        return seen
+
+    def test_he_leaps_across_to_the_next_window(self):
+        self.pet.windows_changed([self.A, self.B])
+        self.stand_on(400, 1000)
+        self.assertEqual(self.pet.standing_on, "a")
+        seen = self.jump()
         self.assertEqual(self.pet.standing_on, "b")
         self.assertAlmostEqual(self.pet._feet(), 950, delta=1)
         left, right = self.pet.box_span()
@@ -598,14 +602,34 @@ class JumpingBetweenWindows(unittest.TestCase):
     def test_and_back_the_other_way(self):
         self.pet.windows_changed([self.A, self.B])
         self.stand_on(1000, 950)
-        target = self.pet._jump_target()
-        self.assertEqual(target[3], "a")
+        self.assertEqual(self.pet._jump_target()[2], "a")
+
+    def test_up_onto_a_window_standing_higher_behind_his(self):
+        high = [500, 800, 700, 600, 2, 0, 0, "eDP-1", "h"]        # behind A, its top 200 px higher
+        self.pet.windows_changed([self.A, high])
+        self.stand_on(450, 1000)
+        self.jump()
+        self.assertEqual(self.pet.standing_on, "h")
+        self.assertAlmostEqual(self.pet._feet(), 800, delta=1)
+
+    def test_down_onto_a_lower_one_in_front(self):
+        low = [550, 1200, 600, 300, 6, 0, 0, "eDP-1", "l"]        # in front, lower down
+        self.pet.windows_changed([self.A, low])
+        self.stand_on(400, 1000)
+        self.jump()
+        self.assertEqual(self.pet.standing_on, "l")
+
+    def test_from_the_floor_too(self):
+        self.pet.windows_changed([self.A])
+        self.stand_on(900, 1530)
+        self.jump()
+        self.assertEqual(self.pet.standing_on, "a")
 
     def test_not_across_a_gap_too_wide(self):
         far = list(self.B)
-        far[0] = 700 + 400 + 60 * self.pet.scale                 # way over there
+        far[0] = 700 + (cp.LEAP_GAP + 30) * self.pet.scale        # way over there
         self.pet.windows_changed([self.A, far])
-        self.stand_on(400, 1000)
+        self.stand_on(300, 1000)
         self.assertIsNone(self.pet._jump_target())
 
     def test_not_to_a_window_hidden_behind_another(self):
@@ -613,7 +637,7 @@ class JumpingBetweenWindows(unittest.TestCase):
         self.pet.windows_changed([self.A, self.B, cover])
         self.stand_on(400, 1000)
         target = self.pet._jump_target()
-        self.assertTrue(target is None or target[3] != "b")
+        self.assertTrue(target is None or target[2] != "b")
 
     def test_he_does_it_on_his_own(self):
         self.pet.windows_changed([self.A, self.B])
@@ -720,6 +744,7 @@ class Birthday(unittest.TestCase):
             d.deleteLater()
         finally:
             cp.hooks_installed = real
+
 
 
 class ClaudeHooks(unittest.TestCase):
