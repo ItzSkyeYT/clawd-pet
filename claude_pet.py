@@ -174,6 +174,11 @@ CLAUDE_LINKS = {
 BUSY_EVENTS = {"UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
                "SubagentStart", "SubagentStop", "PreCompact", "PostCompact"}
 ATTENTION_KINDS = {"permission_prompt", "elicitation_dialog"}
+# What he does while Claude Code works, by the tool it's using (everything else: the laptop).
+TOOL_STYLES = {"Read": "read", "NotebookRead": "read",
+               "Grep": "search", "Glob": "search", "LS": "search",
+               "WebSearch": "web", "WebFetch": "web"}
+STYLE_HOLD = 4000             # ms a working style is kept before switching (no flickering)
 
 DBUS_SERVICE = "org.clawdpet.Pet"
 KWIN_SCRIPT = "clawd-pet-cursor"
@@ -994,6 +999,9 @@ class ClawdPet(QWidget):
         self.ducked = False            # hidden while something is fullscreen on his screen
 
         self.sessions = {}             # Claude Code sessions: state, since, seen
+        self.tool_style = "type"       # what the latest tool calls for (see TOOL_STYLES)
+        self.work_style = None         # what he's actually doing about it right now
+        self._stumble = False
         self.celebrate = None          # ms of work to celebrate once he's free
         self.greet = False
         self.last_message = None
@@ -1495,6 +1503,10 @@ class ClawdPet(QWidget):
             if s["state"] != "busy":
                 s["since"] = self.now
             s["state"] = "busy"
+            if ev == "PreToolUse" and msg.get("tool"):
+                self.tool_style = TOOL_STYLES.get(msg["tool"], "type")
+            if ev == "PostToolUseFailure":
+                self._stumble = True
         elif ev == "PermissionRequest" or (ev == "Notification" and (
                 msg.get("kind") in ATTENTION_KINDS or (not msg.get("kind") and s["state"] == "busy"))):
             s["state"] = "waiting"
@@ -2050,12 +2062,136 @@ class ClawdPet(QWidget):
         return None
 
     def _act_work(self, demo=False):
-        """Typing on the laptop for as long as Claude Code is busy (or a while, as a preview)."""
+        """While Claude Code works, do what it's doing: read with glasses on,
+        search with the magnifying glass, go out on the cloud for the web,
+        type on the laptop for everything else. As a preview, a bit of each."""
         yield from self._come_back()
         if demo:
-            yield from self._act_laptop(duration=8000)
+            for style in ("type", "read", "search", "web"):
+                started = self.now
+                yield from self._work_in(style, lambda: self.now - started > 3500)
+            self.work_style = None
+            return
+        while self.claude_mode() == "busy":
+            style, started = self.tool_style, self.now
+
+            def done(style=style, started=started):
+                return self.claude_mode() != "busy" or (
+                    self.tool_style != style and self.now - started >= STYLE_HOLD)
+            yield from self._work_in(style, done)
+        self.work_style = None
+
+    def _work_in(self, style, done):
+        self.work_style = style
+        if style == "read":
+            yield from self._work_read(done)
+        elif style == "search":
+            yield from self._work_search(done)
+        elif style == "web":
+            yield from self._work_web(done)
         else:
-            yield from self._act_laptop(until_idle=True)
+            yield from self._work_type(done)
+
+    def _work_type(self, done):
+        mirror = self._mirror_for("laptop")
+        self.pad = self._pads("laptop", mirror)
+        a = self.sp.anims["laptop"]
+        yield from self._play("laptop", range(0, a.loop[0]), mirror)
+        lo, hi = a.loop
+        i = lo
+        while not done():
+            yield from self._maybe_stumble()
+            react = self._typing_reaction()
+            if react is None:
+                self.show_frame("laptop", i, mirror)
+            else:
+                if mirror and react in ("look_l", "look_r"):
+                    react = "look_r" if react == "look_l" else "look_l"
+                self.show_frame("type_" + react, i - lo, mirror)
+            yield a.ms[i]
+            i = lo if i == hi else i + 1
+        c, d = a.outro
+        yield from self._play("laptop", range(c, d + 1), mirror)
+
+    def _face(self, default):
+        """His face while working with props: happy while petted, a quick look
+        at a nearby pointer, else `default`."""
+        react = self._typing_reaction()
+        return default if react is None else react
+
+    def _work_read(self, done):
+        aside, page = (18, 6), PAGE_AT
+        yield from self._move_layer("page", aside, page, 5, 60)
+        yield from self._move_layer("glasses", (18, 3), GLASSES_AT, 5, 50)
+        k = 0
+        while not done():
+            yield from self._maybe_stumble()
+            self.pose(self._face(("read_l", "read_r")[k % 2]))
+            k += 1
+            yield 420
+        yield from self._move_layer("glasses", GLASSES_AT, (18, 3), 5, 50)
+        del self.layers["glasses"]
+        yield from self._move_layer("page", page, aside, 5, 50)
+        del self.layers["page"]
+        self.pose("idle")
+
+    def _work_search(self, done):
+        """Sweeping the magnifying glass over the ground in front of him."""
+        lens_y = self.ih - 5 - MAGNIFIER_LENS[1]
+        spots = [(x - MAGNIFIER_LENS[0], lens_y) for x in (4, 12, 20, 12)]
+        yield from self._move_layer("magnifier", (20, 4), spots[0], 5, 60)
+        at, k = spots[0], 0
+        while not done():
+            yield from self._maybe_stumble()
+            nxt = spots[(k + 1) % len(spots)]
+            for step in range(1, 7):
+                t = step / 6
+                self.layers["magnifier"] = (at[0] + (nxt[0] - at[0]) * t, at[1] + (nxt[1] - at[1]) * t)
+                self.pose(self._face("read_l" if nxt[0] < at[0] else "read_r"))
+                yield 90
+            at, k = nxt, k + 1
+            if random.random() < 0.15:
+                self._emit("excl", 11, -8, vy=-2, life=900)
+        yield from self._move_layer("magnifier", at, (20, 4), 5, 50)
+        del self.layers["magnifier"]
+        self.pose("idle")
+
+    def _work_web(self, done):
+        """Out on the web: up on his cloud, bobbing and looking around."""
+        a = self.sp.anims["cloud"]
+        yield from self._play("cloud", range(0, a.loop[0]))              # hop on
+        self.lift, self.front = CLOUD_LIFT, self.sp.cloud_at
+        self.y -= 2 * self.scale                                          # float up a touch
+        base = self.front
+        self.scripted = True
+        k = 0
+        while not done():
+            yield from self._maybe_stumble()
+            self.front = (base[0], base[1] + (k // 3) % 2)                 # a gentle bob
+            self.pose(self._face(("look_l", "idle", "look_r", "idle")[(k // 2) % 4]))
+            k += 1
+            yield 300
+        self.front = base
+        self._leave_cloud()
+        self.y += 2 * self.scale
+        self.scripted = False
+        c, d = a.outro
+        yield from self._play("cloud", range(c, d + 1))                  # hop off
+
+    def _maybe_stumble(self):
+        """A tool just failed: a stumble with a sweat drop, then back to work."""
+        if not self._stumble:
+            return
+        self._stumble = False
+        s, head = self.scale, -self.lift
+        frame, base = self.frame, self.x
+        self.pose("surprised")
+        self._emit("drop", 21, head + 1, vy=1, g=20, life=1000)
+        for k in range(8):
+            self.x = base + (s if k % 2 else -s)
+            yield 70
+        self.x = base
+        self.frame = frame
 
     def _act_attention(self, demo=False):
         """Claude Code needs you: wave with a "!" until it's answered (or a while, as a preview)."""

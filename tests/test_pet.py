@@ -529,6 +529,55 @@ class ClaudeHooks(unittest.TestCase):
         self.pet.claude_event({"event": "UserPromptSubmit", "session": "a"})
         self.assertEqual(self.pet.action, "work")
 
+    def busy_with(self, tool, ms=3000):
+        self.pet.claude_event({"event": "UserPromptSubmit", "session": "a"})
+        self.pet.claude_event({"event": "PreToolUse", "session": "a", "tool": tool})
+        run_ms(self.pet, ms)
+
+    def test_reading_tools_get_the_glasses_out(self):
+        self.busy_with("Read")
+        self.assertEqual(self.pet.action, "work")
+        self.assertEqual(set(self.pet.layers), {"glasses", "page"})
+
+    def test_search_tools_get_the_magnifying_glass(self):
+        self.busy_with("Grep")
+        self.assertIn("magnifier", self.pet.layers)
+
+    def test_web_tools_put_him_on_his_cloud(self):
+        self.busy_with("WebSearch", 4000)
+        self.assertIsNotNone(self.pet.front)
+
+    def test_edits_and_commands_are_laptop_work(self):
+        self.busy_with("Bash")
+        self.assertEqual(self.pet.frame[1], "laptop")
+
+    def test_he_switches_style_when_the_tool_changes(self):
+        self.busy_with("Read")
+        self.pet.claude_event({"event": "PreToolUse", "session": "a", "tool": "Edit"})
+        self.assertTrue(run_ms(self.pet, 12_000, until=lambda: self.pet.frame[1] == "laptop"))
+        self.assertEqual(self.pet.layers, {})
+
+    def test_quick_tool_flips_dont_make_him_flicker(self):
+        self.busy_with("Read", 500)
+        styles = []
+        for i in range(12):                            # Read/Edit every half second for 6 s
+            self.pet.claude_event({"event": "PreToolUse", "session": "a", "tool": ("Edit", "Read")[i % 2]})
+            run_ms(self.pet, 500)
+            style = self.pet.work_style
+            if not styles or styles[-1] != style:
+                styles.append(style)
+        self.assertLessEqual(len(styles), 3, styles)
+
+    def test_a_failed_tool_makes_him_stumble(self):
+        self.busy_with("Bash")
+        self.pet.claude_event({"event": "PostToolUseFailure", "session": "a", "tool": "Bash"})
+        seen = set()
+        for _ in range(100):
+            self.pet.advance(16)
+            seen |= {q["kind"] for q in self.pet.particles}
+        self.assertIn("drop", seen)
+        self.assertEqual(self.pet.action, "work")
+
     def test_an_idle_reminder_after_the_turn_does_not_nag(self):
         self.pet.claude_event({"event": "Notification", "session": "a", "kind": "idle_prompt"})
         run_ms(self.pet, 500)
