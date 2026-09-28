@@ -603,6 +603,53 @@ class ClaudeHooks(unittest.TestCase):
         self.assertNotIn("SECRET", json.dumps(self.pet.last_message))
         self.assertEqual(self.pet.claude_mode(), "busy")
 
+    def test_he_can_stop_following_claude_code(self):
+        self.pet.claude_event({"event": "UserPromptSubmit", "session": "a"})
+        run_ms(self.pet, 500)
+        self.assertEqual(self.pet.action, "work")
+        self.pet.set_pref("claude", False)
+        self.assertNotEqual(self.pet.action, "work")                # stops straight away
+        for ev in ({"event": "PreToolUse", "session": "a", "tool": "Read"},
+                   {"event": "PermissionRequest", "session": "a", "tool": "Bash"},
+                   {"event": "Stop", "session": "a"},
+                   {"event": "SessionStart", "session": "b"}):
+            self.pet.claude_event(ev)
+            run_ms(self.pet, 300)
+            self.assertNotIn(self.pet.action, ("work", "attention", "celebrate", "wave"), ev)
+        self.assertIsNone(self.pet.claude_mode())
+        self.assertEqual(self.pet.click_kind(), "continue")
+        self.pet.set_pref("claude", True)
+        self.pet.claude_event({"event": "UserPromptSubmit", "session": "a"})
+        run_ms(self.pet, 500)
+        self.assertEqual(self.pet.action, "work")                   # and back again
+
+    def test_prompts_still_mean_you_are_there(self):
+        self.pet.set_pref("claude", False)
+        self.pet.now += cp.AWAY + 1000
+        self.pet.claude_event({"event": "UserPromptSubmit", "session": "a"})
+        self.assertEqual(self.pet._input_at, self.pet.now)
+
+    def test_the_socket_can_change_a_setting(self):
+        self.assertTrue(self.pet.listen(self.sock))
+
+        def send(msg):
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(self.sock)
+            s.sendall((json.dumps(msg) + "\n").encode())
+            s.close()
+        send({"cmd": "set", "pref": "claude", "value": False})
+        self.assertTrue(self.pump(lambda: self.pet.prefs["claude"] is False))
+        send({"cmd": "set", "pref": "claude", "value": "yes"})       # wrong type: ignored
+        send({"cmd": "set", "pref": "nonsense", "value": True})      # not a setting: ignored
+        send({"cmd": "set", "pref": "activity", "value": "frantic"}) # not a choice: ignored
+        send({"cmd": "set", "pref": "break_every", "value": True})   # a bool is not a number
+        send({"cmd": "set", "pref": "quiet", "value": True})
+        self.assertTrue(self.pump(lambda: self.pet.prefs["quiet"] is True))
+        self.assertIs(self.pet.prefs["claude"], False)
+        self.assertEqual(self.pet.prefs["activity"], "normal")
+        self.assertEqual(self.pet.prefs["break_every"], 60)
+        self.assertIs(self.pet.status()["claude"], False)
+
     def test_the_hook_is_silent_and_quick_without_a_pet(self):
         t = time.time()
         r = self.hook({"hook_event_name": "Stop", "session_id": "s1"}, sock=self.sock + ".missing")
@@ -1212,6 +1259,8 @@ class Settings(unittest.TestCase):
             self.assertEqual(d.hooks_button.text(), "Remove")
             d.checks["pointer"].setChecked(False)
             self.assertIs(self.pet.prefs["pointer"], False)
+            d.checks["claude"].setChecked(False)
+            self.assertIs(self.pet.prefs["claude"], False)
             d.scenes["dance"].setChecked(False)
             d.scenes["race"].setChecked(False)
             d.scenes["dance"].setChecked(True)

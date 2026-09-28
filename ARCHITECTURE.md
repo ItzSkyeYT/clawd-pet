@@ -55,6 +55,9 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
   Anything you asked for (menu Play, a click, socket play, petting) finishes first
   (`start(..., manual=True)`), as do climbs, leaps, icon visits, reading and falls;
   `_next()` then goes straight to what Claude Code needs
+- With the `claude` pref off, `claude_event()` drops everything after noting a prompt as
+  activity, `claude_mode()` returns None, and turning it off clears the sessions; the hooks
+  keep firing (they're async and cheap), so switching back on is instant
 - What he does while busy follows the tool (`TOOL_STYLES` on PreToolUse): Read → glasses
   and a page, Grep/Glob/LS → the magnifying glass, WebSearch/WebFetch → out on his cloud,
   anything else → the laptop. A style is held for `STYLE_HOLD` so quick tool switches

@@ -103,6 +103,7 @@ PREF_DEFAULTS = {
     "activity": "normal",     # calm | normal | lively: how long he rests between scenes
     "scenes_off": [],         # scenes he doesn't do on his own (the Play menu still has them all)
     "quiet": False,           # stays put and keeps to himself; Claude Code still shows
+    "claude": True,           # follows Claude Code through its hooks
     "pointer": True,          # watches the pointer
     "petting": True,          # stroke him for hearts
     "duck": True,             # drops out of sight for fullscreen windows
@@ -1847,6 +1848,8 @@ class ClawdPet(QWidget):
                 continue
             if msg.get("cmd") == "play" and msg.get("action") in PLAYABLE:
                 self.play(msg["action"])
+            elif msg.get("cmd") == "set" and self.pref_ok(msg.get("pref"), msg.get("value")):
+                self.set_pref(msg["pref"], msg["value"])
             elif msg.get("cmd") == "restart":
                 self.restart()
             elif msg.get("cmd") == "icons":
@@ -1871,14 +1874,17 @@ class ClawdPet(QWidget):
                 "catcher": None if self.catcher is None else
                 [self.catcher.x(), self.catcher.y(), self.catcher.width(), self.catcher.height(),
                  self.catcher.isVisible()],
-                "at": [self.pos().x(), self.pos().y(), self.width(), self.height()]}
+                "at": [self.pos().x(), self.pos().y(), self.width(), self.height()],
+                "claude": self.prefs["claude"], "quiet": self.prefs["quiet"]}
 
     def claude_event(self, msg):
         self.last_message = msg
-        self._last_activity = self.now
         ev, sid = msg.get("event", ""), msg.get("session") or "?"
         if ev == "UserPromptSubmit":
-            self._user_active()
+            self._user_active()                    # you're here, followed or not
+        if not self.prefs["claude"]:
+            return                                 # not following Claude Code: nothing else to do
+        self._last_activity = self.now
         s = self.sessions.setdefault(sid, {"state": "idle", "since": self.now, "seen": self.now})
         s["seen"] = self.now
         if ev in BUSY_EVENTS:
@@ -1904,6 +1910,8 @@ class ClawdPet(QWidget):
 
     def claude_mode(self):
         """"attention" if a session waits on you, "busy" if one is working, else None."""
+        if not self.prefs["claude"]:
+            return None
         mode = None
         for s in self.sessions.values():
             age = self.now - s["seen"]
@@ -3566,6 +3574,29 @@ class ClawdPet(QWidget):
         self.prefs[key] = value
         if key == "quiet" and value and not self.manual and self.action in OWN_SCENE_ACTIONS:
             self.start("idle")                   # hush: wrap up whatever he was doing
+        if key == "claude" and not value:        # stop following Claude Code: forget it all
+            self.sessions.clear()
+            self.celebrate, self.greet, self._stumble = None, False, False
+            if not self.manual and self.action in ("work", "attention", "celebrate"):
+                self.start("idle")
+
+    @staticmethod
+    def pref_ok(key, value):
+        """Is this a value the setting can take? (For settings changed over the socket.)"""
+        if key not in PREF_DEFAULTS:
+            return False
+        default = PREF_DEFAULTS[key]
+        if type(value) is not type(default):     # type(), not isinstance(): a bool isn't a number
+            return False
+        if key == "activity":
+            return value in ACTIVITY
+        if key == "hat":
+            return value in ("auto", "none") or value in HATS
+        if key in ("break_every", "water_every"):
+            return 10 <= value <= 240
+        if key == "scenes_off":
+            return all(isinstance(v, str) for v in value)
+        return True
 
     def open_settings(self):
         d = getattr(self, "_settings_dialog", None)
@@ -3612,6 +3643,10 @@ class ClawdPet(QWidget):
         quiet.setCheckable(True)
         quiet.setChecked(self.prefs["quiet"])
         quiet.triggered.connect(lambda on: self.set_pref("quiet", on))
+        follow = m.addAction("Follow Claude Code")
+        follow.setCheckable(True)
+        follow.setChecked(self.prefs["claude"])
+        follow.triggered.connect(lambda on: self.set_pref("claude", on))
         m.addAction("Settings…").triggered.connect(lambda _=False: self.open_settings())
         login = m.addAction("Start at login")
         login.setCheckable(True)
@@ -3702,16 +3737,18 @@ class SettingsDialog(QDialog):
 
         box = QGroupBox("Claude Code")
         grid = QGridLayout(box)
+        grid.addWidget(self._check("claude", "Follow what Claude Code is doing (typing, reading, "
+                                             "calling you over, celebrating)"), 0, 0, 1, 2)
         self.hooks_label = QLabel()
         self.hooks_label.setWordWrap(True)
         self.hooks_button = QPushButton()
         self.hooks_button.clicked.connect(lambda _=False: self._flip_hooks())
-        grid.addWidget(self.hooks_label, 0, 0)
-        grid.addWidget(self.hooks_button, 0, 1)
+        grid.addWidget(self.hooks_label, 1, 0)
+        grid.addWidget(self.hooks_button, 1, 1)
         self.login = QCheckBox("Start Clawd at login")
         self.login.setChecked(autostart_enabled())
         self.login.toggled.connect(lambda on: set_autostart(on))
-        grid.addWidget(self.login, 1, 0, 1, 2)
+        grid.addWidget(self.login, 2, 0, 1, 2)
         root.addWidget(box)
         self._show_hooks()
 

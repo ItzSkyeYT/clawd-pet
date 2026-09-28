@@ -29,8 +29,13 @@ python tools/install_hooks.py --remove   # takes them out again
 `clawd_hook.py` forwards event, tool and session names (never tool inputs) over
 `$XDG_RUNTIME_DIR/clawd-pet.sock`. The socket also takes `{"cmd": "status"}`,
 `{"cmd": "icons"}` and `{"cmd": "play", "action": "climb"}` (handy for testing; any
-name in `PLAYABLE`, including `yawn`, `coffee`, `remind_water`). The settings dialog
-shows whether the hooks are installed and can install or remove them.
+name in `PLAYABLE`, including `yawn`, `coffee`, `remind_water`) and
+`{"cmd": "set", "pref": "claude", "value": false}` (any setting, type-checked). The
+settings dialog shows whether the hooks are installed and can install or remove them.
+
+**Follow Claude Code** (menu and settings, pref `claude`) turns the whole integration
+off without touching the hooks: he ignores every event (prompts still count as you
+being there, for the reminders) and stops typing or calling you over at once.
 Anything you ask for (menu, click, socket play, petting) finishes before he goes back
 to what Claude Code is doing.
 
