@@ -118,7 +118,7 @@ PREF_DEFAULTS = {
     "water": True,            # water reminders...
     "water_every": 45,        # ...this often (minutes)
 }
-ACTIVITY = {"calm": 2.0, "normal": 1.0, "lively": 0.5}      # multiplies the rest between scenes
+ACTIVITY = {"calm": 2.0, "normal": 1.0, "lively": 0.08}     # multiplies the rest between scenes
 OWN_SCENES = [["walk", "wave", "jump", "jump_happy", "dance", "laptop"],
               ["sparkler", "cloud", "race", "lurk", "sleep"],
               ["climb", "leap", "perch_window", "visit", "read"]]
@@ -251,10 +251,12 @@ LADDER_PALETTE = {"d": RAIL_DARK, "l": RAIL_LIGHT}
 CURSOR_NEAR = 70              # sprite pixels: how close the pointer must be for him to watch it
 GLANCE_MS = 1400
 ARMS_UP = ("anim", "jump", 2, False)   # a folder is being dragged over him: "for me?"
-GRAB_REACH = 30               # cells above his head he'll jump up to the pointer from
-GRAB_LINGER = 1500            # ms the pointer hangs around above him before he might grab it
-GRAB_CHANCE = 0.45            # ...and then he does, this often
-GRAB_COOLDOWN = 3 * 60_000    # before he grabs it again on his own
+GRAB_REACH = 45               # cells above his head he'll jump up to the pointer from
+GRAB_SIDE = 40                # ...and to either side of him (he walks under it first)
+GRAB_LINGER = 700             # ms the pointer hangs around near him before he might grab it
+GRAB_CHANCE = 0.8             # ...and then he does, this often
+GRAB_COOLDOWN = 45_000        # before he grabs it again on his own (a third of that when lively)
+GRAB_WHILE = {"idle", "walk", "wave", "jump", "jump_happy", "dance", "sparkler", "laptop", "yawn"}
 DANGLE_FOR = (15_000, 45_000) # how long he hangs on, unless you shake him off
 SHAKE_FLIPS = 4               # quick back-and-forths within SHAKE_MS shake him off
 SHAKE_MS = 1300
@@ -1760,7 +1762,9 @@ class ClawdPet(QWidget):
             self.start("idle")
 
     def _rest_range(self):
-        sleepy = self.now - self._last_activity > WIND_DOWN or (self.prefs["day_cycle"] and self.is_night())
+        lively = self.prefs["activity"] == "lively"            # lively never winds down
+        sleepy = ((self.now - self._last_activity > WIND_DOWN and not lively)
+                  or (self.prefs["day_cycle"] and self.is_night()))
         lo, hi = REST_SLEEPY if sleepy else REST
         k = ACTIVITY.get(self.prefs["activity"], 1.0)
         return lo * k, hi * k
@@ -1778,7 +1782,8 @@ class ClawdPet(QWidget):
 
     def _pick_action(self):
         off = set(self.prefs["scenes_off"])
-        drowsy = self.now - self._last_activity > WIND_DOWN
+        lively = self.prefs["activity"] == "lively"
+        drowsy = self.now - self._last_activity > WIND_DOWN and not lively
         if self.prefs["quiet"]:                    # keeps to himself: a nap at most
             return "sleep" if drowsy and "sleep" not in off and random.random() < 0.3 else "idle"
         weights = self._scene_weights(drowsy)
@@ -1786,7 +1791,7 @@ class ClawdPet(QWidget):
             for k in LIVELY:
                 if k in weights:
                     weights[k] *= 0.3
-            weights["sleep"] = max(weights.get("sleep", 0), 20)
+            weights["sleep"] = max(weights.get("sleep", 0), 6 if lively else 20)
             weights["yawn"] = 10
         weights = {k: v for k, v in weights.items() if v > 0 and (k not in off or k == "hop_down")}
         if not weights:
@@ -2414,7 +2419,7 @@ class ClawdPet(QWidget):
         yield from self._come_back()
         end, t = random.uniform(*self._rest_range()), 0.0
         while t < end or self._engaged():         # while you're playing with him, he stays with you
-            hold = random.uniform(1500, 4000)
+            hold = min(random.uniform(1500, 4000), max(250.0, end - t))
             yield hold
             t += hold
             r = random.random()
@@ -2916,6 +2921,110 @@ class ClawdPet(QWidget):
         yield from self._walk_to(geo.left() + back if side < 0 else right_edge - width - back)
         self.offscreen = False
 
+    # ── His settings, open ────────────────────────────────────────
+
+    def _toward_settings(self):
+        d = getattr(self, "_settings_dialog", None)
+        if d is None:
+            return "look_r"
+        left, right = self.box_span()
+        return "look_l" if d.geometry().center().x() < (left + right) / 2 else "look_r"
+
+    def _land_first(self):
+        """Up in the air (he was hanging off the pointer, say)? Come down first."""
+        if self.airborne or self.y < self.ground_y() - 1:
+            self.airborne = True
+            yield from self._fall()
+
+    def _act_settings(self):
+        """Somebody's in his settings! A double take, a start, a bit of sweat;
+        then on go his reading glasses and out comes a page, to read along
+        with you and take each change as it comes. Closed: relief."""
+        yield from self._land_first()
+        yield from self._come_back()
+        look = self._toward_settings()
+        self.pose(look)
+        yield 450
+        self.pose("idle")
+        yield 250
+        self.pose("surprised")                              # wait, what?
+        self._emit("excl", 11, -8, vy=-2, life=900)
+        yield 350
+        yield from self._once("jump")
+        for k in (-1, 1):                                   # a bit of sweat flies off
+            self._emit("drop", 2 if k < 0 else 19, 0.0, vx=5 * k, vy=-7, g=40, life=900)
+        self.pose(look)
+        yield 800
+        yield from self._reading_props(True)
+        k = 0
+        while self._settings_open():
+            if self._settings_news:
+                key, old, new = self._settings_news.pop(0)
+                self._settings_news = [n for n in self._settings_news if n[0] != key]
+                yield from self._take_in(key, old, new)
+                continue
+            self.pose(("read_l", "read_r")[k % 2])
+            k += 1
+            yield 420
+        yield from self._reading_props(False)
+        self.pose("happy")                                  # phew
+        self._emit("heart", self.iw / 2 - 2, -3.0, vy=-4.0, life=1400)
+        yield 500
+        yield from self._once("jump_happy")
+
+    def _reading_props(self, on):
+        aside = [(18, 6), (18, 3)]
+        spots = [PAGE_AT, GLASSES_AT]
+        for name, off, at in zip(("page", "glasses"), aside, spots):
+            if on:
+                yield from self._move_layer(name, off, at, 5, 55)
+            elif name in self.layers:
+                yield from self._move_layer(name, self.layers[name], off, 5, 50)
+                del self.layers[name]
+
+    def _take_in(self, key, old, new):
+        """How he takes a change to his settings."""
+        if key == "activity" and new in ("lively", "calm"):
+            yield from self._reading_props(False)
+            if new == "lively":                             # yes!
+                a = self.sp.anims["dance"]
+                yield from self._play("dance", range(a.loop[0], a.loop[1] + 1))
+            else:                                           # a big, slow stretch
+                yield from self._stretch(900)
+            yield from self._reading_props(True)
+        elif key == "scale":                                # whoa: look at me
+            self.pose("surprised")
+            self._emit("excl", 11, -8, vy=-2, life=800)
+            yield 500
+            for side in ("look_l", "look_r", "look_l"):
+                self.pose(side)
+                yield 260
+            self.pose("happy")
+            yield 500
+        elif key == "hat" and new != "none":                # ooh, a hat
+            yield from self._reading_props(False)
+            for k in range(3):
+                self._emit("spark", 6 + 6 * k, -4, vy=-5, life=700)
+            yield from self._once("jump_happy")
+            yield from self._reading_props(True)
+        elif key == "quiet" and new:                        # shh
+            self.pose("blink")
+            x, y = self._z_spot()
+            self._emit("z_small", x, y, vx=0.7, vy=-2.0, life=1600)
+            yield 1000
+        elif ((key == "scenes_off" and len(new) > len(old)) or new is False
+              or (key == "hat" and new == "none")):         # aww
+            self.pose("sad")
+            self._emit("drop", EYES[0][0], EYES[0][1] + 2, vy=2, g=40, life=1100)
+            yield 1300
+        elif key in ("break_every", "water_every"):         # noted
+            self.pose("happy")
+            yield 400
+        else:                                               # nice
+            self.pose("happy")
+            self._emit("heart", self.iw / 2 - 2, -3.0, vy=-4.0, life=1400)
+            yield 900
+
     # ── Hanging off the pointer ───────────────────────────────────
 
     def _grip_in_window(self, key=None):
@@ -2936,20 +3045,21 @@ class ClawdPet(QWidget):
         if self.cursor is not None:
             self.x, self.y = self._pointer_spot()
 
-    def _can_reach(self, x, y):
-        """Is the pointer just above his head, where he can jump up to it?"""
+    def _can_reach(self, x, y, side=10):
+        """Is the pointer above his head (give or take `side` cells), where he can jump up to it?"""
         left, right = self.box_span()
         s = self.scale
         top = self.y + self.home_px.y() - self.lift * s
-        return left - 10 * s <= x <= right + 10 * s and top - GRAB_REACH * s <= y <= top - 2 * s
+        return left - side * s <= x <= right + side * s and top - GRAB_REACH * s <= y <= top - 2 * s
 
     def _maybe_grab(self, dt):
         """A pointer hanging around just above him while he's idle: now and
         then he jumps up and grabs it (one chance each time it comes by)."""
         c = self.cursor
-        if (self.action != "idle" or self.manual or self.airborne or not self.prefs["grab"]
-                or not self.sp.dangle_drawn or self.prefs["quiet"] or c is None or self.now < self._grab_cool
-                or self.now - c[2] > 5000 or not self._can_reach(c[0], c[1])):
+        if (self.action not in GRAB_WHILE or self.manual or self.airborne or self.scripted or self.lift
+                or self.offscreen or not self.prefs["grab"] or not self.sp.dangle_drawn or self.prefs["quiet"]
+                or c is None or self.now < self._grab_cool or self.now - c[2] > 5000
+                or not self._can_reach(c[0], c[1], GRAB_SIDE)):
             self._linger = 0.0
             return
         self._linger += dt
@@ -3070,7 +3180,7 @@ class ClawdPet(QWidget):
     def _let_go(self, vx, vy):
         """Off the pointer: he drops, carrying its swing, and lands."""
         self._dangling = False
-        self._grab_cool = self.now + GRAB_COOLDOWN
+        self._grab_cool = self.now + GRAB_COOLDOWN * (0.35 if self.prefs["activity"] == "lively" else 1)
         limit = 300 * self.scale
         self.vx = max(-limit, min(limit, vx))
         self.vy = max(-limit, min(limit, vy))
@@ -3889,7 +3999,9 @@ class ClawdPet(QWidget):
     # ── Settings ──────────────────────────────────────────────────
 
     def set_pref(self, key, value):
+        old = self.prefs[key]
         self.prefs[key] = value
+        self.settings_changed(key, old, value)
         if key == "quiet" and value and not self.manual and self.action in OWN_SCENE_ACTIONS:
             self.start("idle")                   # hush: wrap up whatever he was doing
         if key == "grab" and not value and self._dangling:
@@ -3922,9 +4034,20 @@ class ClawdPet(QWidget):
         d = getattr(self, "_settings_dialog", None)
         if d is None or not d.isVisible():
             d = self._settings_dialog = SettingsDialog(self)
+            self._settings_news = []
+            self.start("settings", manual=True)    # somebody's in his settings!
         d.show()
         d.raise_()
         d.activateWindow()
+
+    def _settings_open(self):
+        d = getattr(self, "_settings_dialog", None)
+        return d is not None and d.isVisible()
+
+    def settings_changed(self, key, old, new):
+        """Something changed in the open settings: he'll take it in, in a moment."""
+        if self.action == "settings" and old != new:
+            self._settings_news.append((key, old, new))
 
     # ── Menus ─────────────────────────────────────────────────────
 
@@ -4010,7 +4133,7 @@ class SettingsDialog(QDialog):
         for label, scale in SCALES.items():
             self.scale_box.addItem(label, scale)
         self.scale_box.setCurrentIndex(max(0, self.scale_box.findData(pet.scale)))
-        self.scale_box.currentIndexChanged.connect(lambda _i: pet.set_scale(self.scale_box.currentData()))
+        self.scale_box.currentIndexChanged.connect(lambda _i: self._resize(self.scale_box.currentData()))
         grid.addWidget(self.scale_box, 1, 1)
         grid.addWidget(self._check("quiet", "Quiet mode: he stays put and keeps to himself "
                                             "(Claude Code still shows)"), 2, 0, 1, 2)
@@ -4071,7 +4194,7 @@ class SettingsDialog(QDialog):
         grid.addWidget(self.hooks_button, 1, 1)
         self.login = QCheckBox("Start Clawd at login")
         self.login.setChecked(autostart_enabled())
-        self.login.toggled.connect(lambda on: set_autostart(on))
+        self.login.toggled.connect(lambda on: (set_autostart(on), self.pet.settings_changed("login", not on, on)))
         grid.addWidget(self.login, 2, 0, 1, 2)
         root.addWidget(box)
         self._show_hooks()
@@ -4079,6 +4202,11 @@ class SettingsDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.close)
         root.addWidget(buttons)
+
+    def _resize(self, scale):
+        old = self.pet.scale
+        self.pet.set_scale(scale)
+        self.pet.settings_changed("scale", old, scale)
 
     def _check(self, key, label):
         cb = QCheckBox(label)

@@ -48,16 +48,21 @@ to what Claude Code is doing.
 - **Drop a folder on him** (or a file, for its folder): a new Claude Code session there
   (`claude://code/new?folder=...`, or a terminal in it). He holds still with his arms up
   while you hover, and always takes it as a copy, never a move
-- **Settings…**: how lively he is, size, which scenes he does on his own, pointer,
+- **Settings…**: opening them is an event: a double take, a start, a bit of sweat, then he
+  puts on his reading glasses and reads along, reacting to each change (a dance for
+  Lively, a pout for a scene you turn off, a start when you resize him, a hop for a new
+  hat), and jumps for joy when you close them. The dialog has: how lively he is
+  (Lively: barely a second's rest between scenes and no winding down), size, which scenes he does on his own, pointer,
   petting, fullscreen ducking, time of day, holidays, hat, reminders and their
   intervals, Claude Code hooks, start at login. Changes apply at once (QSettings `prefs/`)
 - **Quiet mode**: he stays put and keeps to himself (a nap at most, no reminders or
   celebrations); Claude Code working or needing you still shows
 - **Drag**: pick him up; let go and he falls (throw him and he bounces)
 - **Stroke him** with the pointer (back and forth): hearts, happy eyes, eventually a dance
-- **He grabs the pointer**: let it hang around just above him while he's idle and he may
-  jump up, grab the arrow's tail and dangle from it, swinging as you move and kicking his
-  legs. He lets go when he's had enough (hanging by one hand first) or when you shake the
+- **He grabs the pointer**: let it hang around near him (above him, or off to one side;
+  he walks under it) and he'll usually jump up, grab the arrow's tail and dangle from it,
+  swinging as you move and kicking his legs. He breaks off a walk or a dance for it; 45 s
+  between grabs (15 s when lively). He lets go when he's had enough (hanging by one hand first) or when you shake the
   pointer back and forth, and drops with the swing you gave him. Never over the tip, so
   your clicks always go through. Play → "Grab the pointer" sends him after it wherever it
   is; the setting is under Reactions

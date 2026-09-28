@@ -1218,7 +1218,23 @@ class Settings(unittest.TestCase):
         self.pet.prefs["activity"] = "calm"
         self.assertEqual(self.pet._rest_range(), (cp.REST[0] * 2, cp.REST[1] * 2))
         self.pet.prefs["activity"] = "lively"
-        self.assertEqual(self.pet._rest_range(), (cp.REST[0] / 2, cp.REST[1] / 2))
+        k = cp.ACTIVITY["lively"]
+        self.assertEqual(self.pet._rest_range(), (cp.REST[0] * k, cp.REST[1] * k))
+        self.pet._last_activity = self.pet.now - cp.WIND_DOWN - 1   # lively never winds down
+        self.assertEqual(self.pet._rest_range(), (cp.REST[0] * k, cp.REST[1] * k))
+
+    def idle_share(self, activity):
+        self.pet.prefs["activity"] = activity
+        self.pet.start("idle")
+        idle = 0
+        for _ in range(int(120_000 / 16)):
+            self.pet.advance(16)
+            idle += self.pet.action == "idle"
+        return idle / int(120_000 / 16)
+
+    def test_lively_means_always_up_to_something(self):
+        self.assertLess(self.idle_share("lively"), 0.2)
+        self.assertGreater(self.idle_share("normal"), 0.3)
 
     def stroke(self):
         left, right = self.pet.box_span()
@@ -1860,6 +1876,31 @@ class GrabThePointer(unittest.TestCase):
         run_ms(self.pet, 500)
         self.assertEqual(self.pet.action, "grab")
 
+    def test_he_goes_for_a_pointer_off_to_his_side(self):
+        cp.GRAB_CHANCE = 1.0
+        left, right = self.pet.box_span()
+        x = int(right + 25 * self.pet.scale)                     # well off to his right
+        y = int(self.pet.y + self.pet.home_px.y() - 60)
+        for i in range(150):
+            self.pet.cursor_moved(x + i % 3, y)
+            self.pet.advance(16)
+            if self.pet.action == "grab":
+                break
+        self.assertEqual(self.pet.action, "grab")
+        self.assertTrue(run_ms(self.pet, 6000, until=lambda: self.pet._dangling))
+
+    def test_he_breaks_off_a_walk_for_it(self):
+        cp.GRAB_CHANCE = 1.0
+        self.pet.start("walk")
+        self.pet.advance(16)
+        for i in range(150):
+            x, y = self.above_him()
+            self.pet.cursor_moved(x + i % 3, y)
+            self.pet.advance(16)
+            if self.pet.action == "grab":
+                break
+        self.assertEqual(self.pet.action, "grab")
+
     def test_not_when_turned_off_or_in_quiet_mode(self):
         cp.GRAB_CHANCE = 1.0
         for grab, quiet in ((False, False), (True, True)):
@@ -1890,6 +1931,74 @@ class GrabThePointer(unittest.TestCase):
             f.write("[General]\ncursorSize=12\n[Mouse]\ncursorTheme=breeze_cursors\ncursorSize=48\n")
         self.assertEqual(cp.cursor_grip(path), (14, 32))
         self.assertEqual(cp.cursor_grip(path + ".missing"), (7, 16))
+
+
+class SettingsReaction(unittest.TestCase):
+    def setUp(self):
+        random.seed(21)
+        self.real = cp.hooks_installed
+        cp.hooks_installed = lambda path=None: (13, 13)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.pet.show()
+        self.pet.start("idle")
+        run_ms(self.pet, 100)
+
+    def tearDown(self):
+        cp.hooks_installed = self.real
+        d = getattr(self.pet, "_settings_dialog", None)
+        if d is not None:
+            d.close()
+            d.deleteLater()
+        self.pet.timer.stop()
+        self.pet.hide()
+        self.pet.deleteLater()
+
+    def watch(self, ms, until=None):
+        seen = set()
+        for _ in range(int(ms / 16)):
+            self.pet.advance(16)
+            seen.add(self.pet.frame[1])
+            seen |= {"*" + q["kind"] for q in self.pet.particles}
+            if until and until():
+                break
+        return seen
+
+    def test_opening_his_settings_gets_a_reaction(self):
+        self.pet.open_settings()
+        self.assertEqual(self.pet.action, "settings")
+        seen = self.watch(7000, until=lambda: "glasses" in self.pet.layers and "page" in self.pet.layers
+                          and self.pet.frame[1] in ("read_l", "read_r"))
+        self.assertIn("surprised", seen)                  # a start
+        self.assertIn("*excl", seen)
+        self.assertIn("*drop", seen)                      # a bit of sweat
+        self.assertIn("read_l", seen | {self.pet.frame[1]})
+        d = self.pet._settings_dialog
+        d.scenes["race"].setChecked(False)               # no more karting: aww
+        self.assertIn("sad", self.watch(2000, until=lambda: self.pet.frame[1] == "sad"))
+        d.activity.setCurrentIndex(d.activity.findData("lively"))
+        self.assertIn("dance", self.watch(4000, until=lambda: self.pet.frame[1] == "dance"))
+        self.watch(4000, until=lambda: "glasses" in self.pet.layers and self.pet.frame[1].startswith("read"))
+        d.close()
+        seen = self.watch(6000, until=lambda: self.pet.action != "settings")
+        self.assertNotEqual(self.pet.action, "settings")
+        self.assertIn("jump_happy", seen)                  # relief
+        self.assertNotIn("glasses", self.pet.layers)
+
+    def test_claude_code_waits_while_he_reads_them(self):
+        self.pet.open_settings()
+        self.pet.claude_event({"event": "UserPromptSubmit", "session": "s"})
+        run_ms(self.pet, 1500)
+        self.assertEqual(self.pet.action, "settings")
+
+    def test_opened_while_he_hangs_off_the_pointer(self):
+        left, right = self.pet.box_span()
+        self.pet.cursor_moved(int((left + right) / 2), int(self.pet.y + self.pet.home_px.y() - 40))
+        self.pet.play("grab")
+        self.assertTrue(run_ms(self.pet, 3000, until=lambda: self.pet._dangling))
+        self.pet.open_settings()
+        self.assertTrue(run_ms(self.pet, 6000, until=lambda: "glasses" in self.pet.layers))
+        self.assertFalse(self.pet.airborne)
+        self.assertAlmostEqual(self.pet.y, self.pet.ground_y(), delta=2)
 
 
 class Launcher(unittest.TestCase):

@@ -125,9 +125,18 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
   the raised and the side-held bottle, and every pose he takes in a reminder (a test checks
   the button against his pixels and props)
 
+## His settings, open
+- `open_settings()` starts the manual `settings` scene (Claude Code and reminders wait).
+  `set_pref()` (and the size and login controls) report each change with its old value
+  to `settings_changed()`, which queues it while the scene runs; `_take_in()` turns each
+  into a little reaction (repeats of the same setting are merged, so a spinbox doesn't
+  flood him). He comes down first if he was hanging off the pointer (`_land_first()`)
+
 ## Hanging off the pointer
-- `_maybe_grab()` counts how long the pointer stays within reach above his head while he's
-  idle (it must have moved in the last 5 s); after `GRAB_LINGER` he rolls once per visit
+- `_maybe_grab()` counts how long the pointer stays within reach (up to `GRAB_REACH` cells
+  above his head, `GRAB_SIDE` to either side) while he's idle or in a light scene
+  (`GRAB_WHILE`, on the ground); it must have moved in the last 5 s. After `GRAB_LINGER`
+  he rolls `GRAB_CHANCE` once per visit
 - `_act_grab`: walk under it if it's along his floor, crouch, `_leap_to_pointer()` (a homing
   arc, so a moving pointer is still caught), then `_dangle()` until he lets go (`_let_go()`
   hands him to the normal fall with the pointer's velocity)
