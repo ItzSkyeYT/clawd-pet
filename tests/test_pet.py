@@ -2297,6 +2297,13 @@ class Performance(unittest.TestCase):
         self.assertEqual(calls, [])
         self.pet.catcher.deleteLater()
 
+    def test_the_frame_cache_stays_small(self):
+        for name in ("dance", "race", "cloud", "lurk", "spin_happy", "spin_surprised", "jump"):
+            for i in range(len(self.pet.sp.anims[name].frames)):
+                for mirror in (False, True):
+                    self.pet._pixmap(("anim", name, i, mirror))
+        self.assertLessEqual(len(self.pet._pixmaps), cp.PIXMAP_CACHE)
+
     def test_screens_are_looked_up_once_in_a_while(self):
         self.assertIs(cp.screen_areas(), cp.screen_areas())
 

@@ -14,6 +14,7 @@ Right-click: menu    Drag: pick him up and throw him    Stroke him: he likes it
 """
 
 import ast
+import collections
 import datetime
 import json
 import math
@@ -63,6 +64,7 @@ SKID = 6.0                    # 1/s: how quickly a sideways landing skids to a s
 AIR_DRAG = 0.35               # 1/s: the air slowing him sideways
 THROW_WINDOW = 100            # ms: a throw goes as fast as the drag moved in its last moments
 MASK_BLOCK = 4                # cells: moving particles shape the window in blocks this big
+PIXMAP_CACHE = 120            # scaled frames kept ready (the ones used most recently)
 
 # Speeds in sprite pixels per second, so they grow with the pet. The tempos
 # speed up the official walk cycle so his legs keep up with the pace.
@@ -1493,7 +1495,7 @@ class ClawdPet(QWidget):
         if settings is not None:
             scale = int(settings.value("scale", DEFAULT_SCALE))
         self.scale = scale if scale in SCALES.values() else DEFAULT_SCALE
-        self._pixmaps, self._masks = {}, {}
+        self._pixmaps, self._masks = collections.OrderedDict(), {}
         self._layout()
 
         self.now = 0.0                 # ms of simulated time, advanced by advance()
@@ -2380,7 +2382,9 @@ class ClawdPet(QWidget):
 
     def _pixmap(self, key):
         pm = self._pixmaps.get(key)
-        if pm is None:
+        if pm is not None:
+            self._pixmaps.move_to_end(key)
+        else:
             img = self.sp.anims[key[1]].frames[key[2]] if key[0] == "anim" else self.sp.poses[key[1]]
             if key[-1]:
                 img = flipped(img)
@@ -2389,6 +2393,8 @@ class ClawdPet(QWidget):
                                               Qt.AspectRatioMode.IgnoreAspectRatio,
                                               Qt.TransformationMode.FastTransformation))
             self._pixmaps[key] = pm
+            if len(self._pixmaps) > PIXMAP_CACHE:
+                self._pixmaps.popitem(last=False)   # the one unused the longest
         return pm
 
     def _frame_pos(self, key):
