@@ -10,10 +10,16 @@
 - [x] Walks and rides along the bottom of the screen; sizes Small to Huge (remembered)
 - [x] Roams across monitors: walks off a taller screen and drops, leaps back up,
       throws and drops land on the right floor (tests use the real two-screen layout)
+- [x] Claude Code hooks: types while it works, "!" + wave for permissions, celebrates
+- [x] Left-click opens the Code tab of the Claude app (or the session waiting on you)
+- [x] Watches the pointer, glances at it; stroke him for hearts and a dance
+- [x] Ladder between screens of different heights (up and down)
+- [x] Visits desktop icons: cloud ride up, stands on them, hangs off them
 - [x] Tests (`python -m unittest discover -s tests -v`)
 
 ## Possible Improvements
-- [ ] React to Claude Code activity via hooks (typing while it edits, sleeping when idle)
+- [ ] Tool-specific flourishes (cloud for web searches, sparkler for subagents)
+- [ ] Auto-hide over fullscreen windows (he's unmanaged, so he floats above everything)
 - [ ] Startup on login (a .desktop file in ~/.config/autostart)
 - [ ] Trace the /btw video's poses (profile turn, thought bubble)
 - [ ] Windows installer

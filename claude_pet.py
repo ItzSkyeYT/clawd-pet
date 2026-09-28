@@ -16,6 +16,7 @@ Right-click: menu    Drag: pick him up and throw him    Stroke him: he likes it
 import json
 import os
 import random
+import re
 import shutil
 import signal
 import subprocess
@@ -51,6 +52,7 @@ TICK_MS = 16
 WALK_SPEED, WALK_TEMPO = 15, 0.7
 TRIP_SPEED, TRIP_TEMPO = 24, 0.5
 CLOUD_SPEED = 30
+CLOUD_RISE = 28              # riding the cloud up to a desktop icon
 RACE_SPEED = 45
 CLIMB_SPEED = 14
 GRAVITY = 700
@@ -67,8 +69,9 @@ LABELS = {
     "dance": "Dance", "laptop": "Laptop", "sparkler": "Sparkler",
     "cloud": "Ride the cloud", "race": "Go karting", "lurk": "Peek from the edge",
     "sleep": "Nap", "climb": "Climb to the other screen", "leap": "Leap to the other screen",
+    "visit": "Visit a desktop icon",
 }
-PLAYABLE = set(ACTIONS + BETWEEN_SCREENS + ["idle", "work", "attention", "celebrate"])
+PLAYABLE = set(ACTIONS + BETWEEN_SCREENS + ["visit", "idle", "work", "attention", "celebrate"])
 
 # Where the eyes sit in the idle pose (top-left of each 2x2 eye).
 EYES = ((6, 2), (16, 2))
@@ -202,6 +205,21 @@ def climb_rows(idle):
     return ["".join(r) for r in rows]
 
 
+def hang_rows(idle):
+    """Hanging by both hands: the idle body with both arms raised the way
+    Clawd-Jumping raises them."""
+    body = idle[0][4]
+    w = len(idle[0])
+    rows = [list("." * w) for _ in range(4)] + [list(r) for r in idle]
+    for y in range(8, 12):
+        for x in list(range(0, 4)) + list(range(w - 4, w)):
+            rows[y][x] = "."
+    for y in range(0, 4):
+        for x in list(range(5, 9)) + list(range(w - 9, w - 5)):
+            rows[y][x] = body
+    return ["".join(r) for r in rows]
+
+
 def ladder_rows(height):
     rows = []
     for y in range(height):
@@ -247,6 +265,9 @@ class Sprites:
         self.anims["climb"] = Anim("climb", {
             "size": [self.iw, self.ih + 4], "home": [0, 4],
             "frames": [{"ms": 130, "rows": left}, {"ms": 130, "rows": right}]}, palette)
+        self.anims["hang"] = Anim("hang", {
+            "size": [self.iw, self.ih + 4], "home": [0, 4],
+            "frames": [{"ms": 350, "rows": hang_rows(idle)}]}, palette)
         self.glyphs = {k: grid_image(rows, pal) for k, (rows, pal) in GLYPHS.items()}
 
 
@@ -496,6 +517,107 @@ def _distance(r, x, y):
     return (dx * dx + dy * dy) ** 0.5
 
 
+# ── Desktop icons (KDE Plasma) ──────────────────────────────────────
+# Plasma saves where each desktop icon sits in its grid; the grid itself is
+# computed the way Plasma's folder view does it (FolderView.qml), with its
+# default units at the default font and scale.
+
+ICON_PX = [22, 32, 48, 64, 96, 128, 256]        # Plasma's iconSize setting 0..6
+GRID_UNIT, SMALL_SPACING, SMALL_ICON = 18, 4, 16
+PLASMA_CONFIG = os.path.expanduser("~/.config/plasma-org.kde.plasma.desktop-appletsrc")
+
+
+def desktop_dir():
+    try:
+        out = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True, timeout=2).stdout.strip()
+        if out:
+            return out
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return os.path.expanduser("~/Desktop")
+
+
+def _extra(cell, container):
+    """Plasma spreads leftover space evenly over the columns (calcExtraSpacing)."""
+    n = container // cell
+    return (container - n * cell) // n if n > 0 else 0
+
+
+def plasma_desktop_icons(config=PLASMA_CONFIG, desktop=None, screens=None):
+    """[(file name, QRect of the icon image)] for icons on Plasma's desktop.
+
+    `screens` are QRects (or (geometry, usable area) pairs); a folder view's
+    saved positions are keyed by the resolution of the screen it belongs to.
+    """
+    try:
+        with open(config) as f:
+            text = f.read()
+    except OSError:
+        return []
+    desktop = desktop or desktop_dir()
+    if screens is None:
+        screens = [(sc.geometry(), usable_area(sc.geometry(), sc.availableGeometry()))
+                   for sc in QApplication.screens()]
+    screens = [s if isinstance(s, tuple) else (s, s) for s in screens]
+    sections, current = {}, None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            current = sections.setdefault(line, {})
+        elif current is not None and "=" in line:
+            key, value = line.split("=", 1)
+            current[key] = value
+    icons = []
+    for name, keys in sections.items():
+        if not re.fullmatch(r"\[Containments\]\[\d+\]", name) or keys.get("plugin") != "org.kde.plasma.folder":
+            continue
+        general = sections.get(name + "[General]", {})
+        try:
+            positions = json.loads(general.get("positions", "{}"))
+            size = ICON_PX[min(max(int(general.get("iconSize", 3)), 0), len(ICON_PX) - 1)]
+            label_width = int(general.get("labelWidth", 1))
+            lines = int(general.get("textLines", 2))
+        except (ValueError, TypeError):
+            continue
+        for resolution, items in positions.items():
+            match = [area for geo, area in screens if f"{geo.width()}x{geo.height()}" == resolution]
+            if not match or not isinstance(items, list):
+                continue
+            area = match[0]
+            min_w = max(size + 2 * GRID_UNIT + 2 * SMALL_SPACING, SMALL_ICON * (label_width * 2 + 4))
+            cell_w = min_w + _extra(min_w, area.width())
+            icon_h = size + GRID_UNIT * lines + SMALL_SPACING * 3
+            cell_h = icon_h + _extra(icon_h, area.height())
+            for i in range(2, len(items) - 2, 3):       # after the rows/columns header
+                url = str(items[i])
+                if not url.startswith("desktop:/"):
+                    continue
+                fname = url[len("desktop:/"):]
+                if not os.path.exists(os.path.join(desktop, fname)):
+                    continue                            # stale: the file is gone
+                try:
+                    row, col = int(items[i + 1]), int(items[i + 2])
+                except ValueError:
+                    continue
+                icons.append((fname, QRect(area.left() + col * cell_w + (cell_w - size) // 2,
+                                           area.top() + row * cell_h + 2 * SMALL_SPACING, size, size)))
+    return icons
+
+
+_icons_cache = {"at": -1e9, "icons": []}
+
+
+def desktop_icons():
+    """Plasma's desktop icons, re-read at most every 30 s (you may move them)."""
+    if os.environ.get("CLAWD_NO_DESKTOP_ICONS"):
+        return []
+    now = time.monotonic()
+    if now - _icons_cache["at"] > 30:
+        _icons_cache["at"] = now
+        _icons_cache["icons"] = plasma_desktop_icons()
+    return _icons_cache["icons"]
+
+
 # ── Props ───────────────────────────────────────────────────────────
 
 class Prop(QWidget):
@@ -579,6 +701,7 @@ class ClawdPet(QWidget):
         self._shown = None
         self._mask = None
         self.ladder = Prop()
+        self.icon_source = desktop_icons
 
         self.sessions = {}             # Claude Code sessions: state, since, seen
         self.celebrate = None          # ms of work to celebrate once he's free
@@ -798,6 +921,8 @@ class ClawdPet(QWidget):
         weights = dict(WEIGHTS)
         if self._lurk_side() is None:
             weights["lurk"] = 0
+        if self._icons_here():
+            weights["visit"] = 6
         if self._seam("up") is not None:
             weights["climb"] = 18        # otherwise he'd pile up on the lower screen
             weights["leap"] = 6
@@ -916,6 +1041,10 @@ class ClawdPet(QWidget):
                 continue
             if msg.get("cmd") == "play" and msg.get("action") in PLAYABLE:
                 self.start(msg["action"])
+            elif msg.get("cmd") == "icons":
+                icons = [[n, r.x(), r.y(), r.width(), r.height()] for n, r in self.icon_source()]
+                conn.write((json.dumps(icons) + "\n").encode())
+                conn.flush()
             elif msg.get("cmd") == "status":
                 conn.write((json.dumps(self.status()) + "\n").encode())
                 conn.flush()
@@ -968,7 +1097,7 @@ class ClawdPet(QWidget):
     def _react(self):
         """Switch to what Claude Code needs now, unless he's in the middle of something physical."""
         if (self.dragging or self.airborne or self.scripted
-                or self.action in ("held", "fall", "climb", "leap")):
+                or self.action in ("held", "fall", "climb", "leap", "visit")):
             return                                  # _next() catches up when he's back on his feet
         mode = self.claude_mode()
         if mode == "attention" and self.action != "attention":
@@ -1011,20 +1140,20 @@ class ClawdPet(QWidget):
                 self._last_heart = self.now
                 self._emit("heart", self.iw / 2 - 2 + random.uniform(-6, 6), -3.0,
                            vx=random.uniform(-1, 1), vy=-4.0, life=1400)
-            if self.action == "idle" and self.frame[0] == "pose":
+            if self.action in ("idle", "visit") and self.frame[0] == "pose":
                 self.pose("happy")
             if self._pet_ms > 3500 and self.action == "idle":
                 self._pet_ms = 0.0
                 self.start("dance")                 # he loves it
         else:
             self._pet_ms = max(0.0, self._pet_ms - dt)
-            if self._was_petting and self.action == "idle" and self.frame == ("pose", "happy", False):
+            if self._was_petting and self.action in ("idle", "visit") and self.frame == ("pose", "happy", False):
                 self.pose("idle")
         self._was_petting = petting
 
     def _watch_cursor(self):
         """While idle, follow a nearby, moving pointer with his eyes."""
-        if self.action != "idle" or self.frame[0] != "pose" or self.now < self._petting_until:
+        if self.action not in ("idle", "visit") or self.frame[0] != "pose" or self.now < self._petting_until:
             self._tracking = False
             return
         eyes = None
@@ -1212,8 +1341,12 @@ class ClawdPet(QWidget):
                 t += 900
                 self.pose("idle")
 
-    def _walk_to(self, target, speed=WALK_SPEED, tempo=WALK_TEMPO):
-        """Crab-walk until the idle pose's left edge reaches `target`."""
+    def _walk_to(self, target, speed=None, tempo=None):
+        """Crab-walk until the idle pose's left edge reaches `target` (at the
+        faster trip pace when it's far)."""
+        far = abs(target - self.box_span()[0]) > 600
+        speed = speed or (TRIP_SPEED if far else WALK_SPEED)
+        tempo = tempo or (TRIP_TEMPO if far else WALK_TEMPO)
         direction = 1 if target > self.box_span()[0] else -1
         self.vx = direction * speed * self.scale
         steps = self._loop("walk", mirror=direction < 0, tempo=tempo)
@@ -1511,11 +1644,102 @@ class ClawdPet(QWidget):
             yield 1000
 
     def _act_fall(self):
+        yield from self._fall()
+
+    def _fall(self):
         self.show_frame("jump", 2)
         while self.airborne:
             yield TICK_MS
         # Clawd-Jumping's landing: squash, wobble, back to standing
         yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
+
+    # ── Desktop icons ─────────────────────────────────────────────
+
+    def _icons_here(self):
+        geo = self.screen_geometry()
+        return [(n, r) for n, r in self.icon_source() if geo.contains(r.center())]
+
+    def _act_visit(self, hang=None):
+        """Ride the cloud up to a desktop icon, stand on it (if there's room
+        above it) and maybe hang off its side, then drop back down."""
+        icons = self._icons_here()
+        if not icons:
+            return
+        _, icon = random.choice(icons)
+        s = self.scale
+        width = self.iw * s
+        geo = self.screen_geometry()
+        stand = icon.top() - geo.top() >= (self.ih + 14) * s     # room for him (and his cloud) on top
+        hang = (random.random() < 0.5 if hang is None else hang) or not stand
+        # hang off whichever side has more room, one raised hand on the corner
+        right = geo.left() + geo.width() - (icon.left() + icon.width()) >= icon.left() - geo.left()
+        hang_left = icon.left() + icon.width() - 7 * s if right else icon.left() - 17 * s
+        hang_y = icon.top() + 2 * s - self.home_px.y()           # hands just over the top edge
+        if stand:
+            spot, spot_y = icon.center().x() - width / 2, icon.top() - self.home_px.y() - self.ih * s
+        else:
+            spot, spot_y = hang_left, hang_y
+        yield from self._walk_to(spot)
+        if abs(self.box_span()[0] - spot) > 4 * s:
+            return                                               # couldn't get underneath it
+        yield from self._cloud_up(spot_y)
+        if stand:
+            yield from self._perch(random.uniform(5000, 12000))
+            if hang:
+                self.show_frame("jump", 2)
+                yield from self._arc_to(hang_left, hang_y + self.home_px.y() + self.ih * s, 2 * s, hold=True)
+        if hang:
+            yield from self._hang(random.uniform(3000, 8000))
+        self.scripted = False                                    # let go
+        self.airborne = True
+        self.vx, self.vy = random.uniform(-10, 10) * s, (0.0 if hang else -15.0 * s)
+        yield from self._fall()
+
+    def _cloud_up(self, target_y):
+        """Hop on the official cloud, rise to `target_y`, hop off (it flies away)."""
+        a = self.sp.anims["cloud"]
+        yield from self._play("cloud", range(0, a.loop[0]))
+        self.scripted = True
+        steps = self._loop("cloud")
+        while self.y > target_y + 0.5:
+            ms = next(steps)
+            for _ in range(max(1, int(ms // TICK_MS))):
+                self.y = max(target_y, self.y - CLOUD_RISE * self.scale * TICK_MS / 1000)
+                yield TICK_MS
+        self.y = target_y
+        c, d = a.outro
+        yield from self._play("cloud", range(c, d + 1))
+
+    def _perch(self, duration):
+        """Standing on an icon: blinking, looking about, watching the pointer."""
+        self.scripted = True
+        self.pose("idle")
+        t = 0.0
+        while t < duration:
+            hold = random.uniform(1200, 3000)
+            yield hold
+            t += hold
+            if random.random() < 0.5:
+                self.pose("blink")
+                yield 110
+            else:
+                self.pose(self._glance())
+                yield 900
+            self.pose("idle")
+            t += 500
+
+    def _hang(self, duration):
+        """Dangling from the icon's top edge, swinging a little."""
+        self.scripted = True
+        base, s = self.x, self.scale
+        t, k = 0.0, 0
+        while t < duration:
+            self.show_frame("hang", 0)
+            self.x = base + (s, 0, -s, 0)[k % 4]
+            k += 1
+            yield 350
+            t += 350
+        self.x = base
 
     # ── Mouse ─────────────────────────────────────────────────────
 

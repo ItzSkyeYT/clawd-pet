@@ -21,6 +21,7 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.environ["QT_QPA_PLATFORM"] = "offscreen:configfile=" + os.path.join(ROOT, "tests", "screens.json")
+os.environ["CLAWD_NO_DESKTOP_ICONS"] = "1"      # never read the real desktop's icons in tests
 sys.path.insert(0, ROOT)
 
 from PyQt6.QtCore import QRect, Qt  # noqa: E402
@@ -493,6 +494,78 @@ class CursorReactions(unittest.TestCase):
         js = cp.kwin_cursor_script()
         self.assertIn("cursorPosChanged", js)
         self.assertIn(cp.DBUS_SERVICE, js)
+
+
+class DesktopIcons(unittest.TestCase):
+    LAPTOP = QRect(0, 330, 1920, 1200)
+
+    def setUp(self):
+        random.seed(2)
+        self.tmp = tempfile.mkdtemp()
+        self.desktop = os.path.join(self.tmp, "Desktop")
+        os.makedirs(self.desktop)
+        for name in ("Old Firefox Data", "steam.desktop", "com.blackmagicdesign.resolve.desktop"):
+            open(os.path.join(self.desktop, name), "w").close()
+        self.config = os.path.join(self.tmp, "appletsrc")
+        with open(self.config, "w") as f:
+            f.write("[Containments][44]\nplugin=org.kde.plasma.folder\n\n"
+                    "[Containments][44][General]\n"
+                    'positions={"1920x1200":["4","17","desktop:/steam.desktop","2","0",'
+                    '"desktop:/com.blackmagicdesign.resolve.desktop","0","1",'
+                    '"desktop:/Gone.desktop","1","1","desktop:/Old Firefox Data","0","0"]}\n')
+
+    def test_icons_come_from_plasmas_grid(self):
+        icons = cp.plasma_desktop_icons(self.config, self.desktop, [self.LAPTOP])
+        rects = {name: r for name, r in icons}
+        # 17 columns of 112px and rows of 120px fill the 1920x1200 screen; the
+        # 64px icon is centred in its cell, 8px down
+        self.assertEqual(rects["Old Firefox Data"], QRect(24, 338, 64, 64))
+        self.assertEqual(rects["com.blackmagicdesign.resolve.desktop"], QRect(136, 338, 64, 64))
+        self.assertEqual(rects["steam.desktop"], QRect(24, 578, 64, 64))
+        self.assertNotIn("Gone.desktop", rects)          # file no longer on the desktop
+
+    def test_no_config_no_icons(self):
+        self.assertEqual(cp.plasma_desktop_icons(self.config + ".missing", self.desktop, [self.LAPTOP]), [])
+
+    def visit(self, hang, icon=QRect(136, 578, 64, 64)):
+        pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        pet.icon_source = lambda: [("DaVinci", icon)]
+        pet.set_box_left(400)
+        pet.y = pet.ground_y()
+        pet.start("visit", hang=hang)
+        perched = hanging = False
+        for _ in range(int(120_000 / 16)):
+            pet.advance(16)
+            feet = pet._feet()
+            left, right = pet.box_span()
+            if pet.action == "visit" and abs(feet - icon.top()) < 1 and left < icon.center().x() < right:
+                perched = True
+            if pet.frame[:2] == ("anim", "hang"):
+                hands_top = pet.y + pet.frame_rect(pet.sp.anims["hang"], 0, False).top()
+                self.assertLessEqual(hands_top, icon.top())
+                self.assertGreater(hands_top + 4 * pet.scale, icon.top())   # hands on the top edge
+                hanging = True
+            if pet.action == "idle":
+                break
+        self.assertEqual(pet.action, "idle")
+        self.assertAlmostEqual(pet._feet(), 1530, delta=1)                    # back on the floor
+        pet.timer.stop()
+        pet.deleteLater()
+        return perched, hanging
+
+    def test_he_rides_the_cloud_up_and_stands_on_an_icon(self):
+        perched, hanging = self.visit(hang=False)
+        self.assertTrue(perched)
+        self.assertFalse(hanging)
+
+    def test_he_hangs_off_an_icon_and_drops(self):
+        perched, hanging = self.visit(hang=True)
+        self.assertTrue(perched and hanging)
+
+    def test_top_row_icons_have_no_room_on_top_so_he_hangs(self):
+        perched, hanging = self.visit(hang=False, icon=QRect(136, 338, 64, 64))
+        self.assertFalse(perched)
+        self.assertTrue(hanging)
 
 
 class Installer(unittest.TestCase):

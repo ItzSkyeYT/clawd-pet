@@ -43,7 +43,32 @@ sprites/clawd.json   (committed; the only thing the app reads)
 - Walks are sometimes long trips to a random spot on any screen; rides stay on one
   screen; he only lurks at outer edges, never at the seam between two screens
 
+## Claude Code hooks
+```
+Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ ClawdPet.claude_event()
+```
+- Sessions are tracked by id: busy (prompt/tool events) → he types on the laptop;
+  waiting (PermissionRequest, permission notifications) → waves with a "!" bubble and
+  a click opens `claude://code/needs-input`; Stop → he celebrates (sparkler after long
+  work). Stale sessions expire (15 min busy, 30 min waiting)
+- Claude Code events only interrupt what he's doing when he's on his feet; climbs,
+  leaps, icon visits and falls finish first
+
+## Pointer
+- KDE Wayland: `start_kwin_cursor_feed()` registers `org.clawdpet.Pet` on D-Bus and
+  loads a KWin script that calls it on `workspace.cursorPosChanged`. Elsewhere he
+  polls `QCursor.pos()`. Hovering over him also counts
+- Petting: three or more direction changes over his body within 1.5 s
+
+## Props and icons
+- The ladder is a separate unmanaged, click-through window (`Prop`), placed on the
+  lower screen by the seam and revealed from the top or bottom
+- Desktop icons come from Plasma's folder-view config (`positions=`), laid out with
+  the same maths as Plasma's FolderView.qml (cell size, extra spacing, icon offset)
+
 ## Platform notes
+- Unmanaged window (`X11BypassWindowManagerHint`): KWin keeps managed X11 windows
+  inside X11's single work area, which pinned him mid-screen on the taller monitor
 - Wayland: forced onto XWayland (`QT_QPA_PLATFORM=xcb`) so `move()` works;
   `launch_env()` strips that before starting terminals or browsers
 - Launch: Linux uses $TERMINAL or the first of konsole, gnome-terminal, kitty,
