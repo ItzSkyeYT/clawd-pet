@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+venv/
+.venv/
+.env*
+
+# Reference media: Anthropic's official Clawd art plus personal screen recordings.
+# It stays on disk (the tracer reads it) but out of git, so this repo can be
+# pushed somewhere without redistributing Anthropic's files or your recordings.
+# tools/fetch_official.py re-downloads the official set.
+assets/
