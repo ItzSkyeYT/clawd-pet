@@ -30,6 +30,11 @@ from PyQt6.QtWidgets import QApplication  # noqa: E402
 APP = QApplication.instance() or QApplication([])
 
 import claude_pet as cp  # noqa: E402
+import datetime  # noqa: E402
+
+# An ordinary afternoon, so the time of day and the date never change what he does.
+AFTERNOON = datetime.datetime(2026, 9, 15, 14, 0)
+cp.wall_clock = lambda: AFTERNOON
 
 HOOK = os.path.join(ROOT, "clawd_hook.py")
 
@@ -1219,6 +1224,8 @@ class Settings(unittest.TestCase):
             self.assertEqual(self.pet.prefs["break_every"], 90)
             d.scale_box.setCurrentIndex(d.scale_box.findData(6))
             self.assertEqual(self.pet.scale, 6)
+            d.hat.setCurrentIndex(d.hat.findData("nightcap"))
+            self.assertEqual(self.pet.prefs["hat"], "nightcap")
             d.close()
             d.deleteLater()
         finally:
@@ -1236,6 +1243,304 @@ class Settings(unittest.TestCase):
         with open(path, "w") as f:
             f.write("not json")
         self.assertEqual(cp.hooks_installed(path)[0], 0)
+
+
+def at(hour, minute=0, day=AFTERNOON.date()):
+    return lambda: datetime.datetime.combine(day, datetime.time(hour, minute))
+
+
+def click(pet):
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QMouseEvent
+    pos = QPointF(pet.home_px.x() + 10, pet.home_px.y() + 10)
+    glob = QPointF(pet.pos().x(), pet.pos().y()) + pos
+    for kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+        ev = QMouseEvent(kind, pos, glob, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier)
+        (pet.mousePressEvent if kind == QEvent.Type.MouseButtonPress else pet.mouseReleaseEvent)(ev)
+
+
+class TimeAndSeasons(unittest.TestCase):
+    def setUp(self):
+        random.seed(5)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.pet.start("idle")
+        run_ms(self.pet, 100)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def test_the_hat_for_the_date(self):
+        d = datetime.date
+        self.assertEqual(cp.season_hat(d(2026, 12, 10)), "santa_hat")
+        self.assertEqual(cp.season_hat(d(2026, 12, 31)), "party_hat")
+        self.assertEqual(cp.season_hat(d(2027, 1, 1)), "party_hat")
+        self.assertEqual(cp.season_hat(d(2026, 10, 28)), "pumpkin_hat")
+        self.assertIsNone(cp.season_hat(d(2026, 10, 20)))
+        self.assertIsNone(cp.season_hat(d(2026, 9, 15)))
+
+    def test_he_wears_the_seasons_hat_unless_told_otherwise(self):
+        self.pet.wall = at(15, day=datetime.date(2026, 12, 12))
+        self.assertEqual(self.pet.hat(), "santa_hat")
+        self.pet.prefs["seasons"] = False
+        self.assertIsNone(self.pet.hat())
+        self.pet.prefs["hat"] = "pumpkin_hat"          # picked by hand: all year round
+        self.assertEqual(self.pet.hat(), "pumpkin_hat")
+        self.pet.prefs["hat"] = "none"
+        self.pet.prefs["seasons"] = True
+        self.assertIsNone(self.pet.hat())
+
+    def test_a_nightcap_for_sleeping_at_night(self):
+        self.pet.wall = at(23, 30)
+        self.pet.start("sleep")
+        self.assertEqual(self.pet.hat(), "nightcap")
+        self.pet.wall = at(14)
+        self.assertIsNone(self.pet.hat())
+
+    def test_the_hat_sits_on_his_head_in_every_frame(self):
+        self.pet.prefs["hat"] = "santa_hat"
+        frames, (ax, ay) = self.pet.sp.hats["santa_hat"]
+        s = self.pet.scale
+        for name, a in self.pet.sp.anims.items():
+            for i, head in enumerate(a.heads):
+                for mirror in (False, True):
+                    self.pet.frame = ("anim", name, i, mirror)
+                    got = self.pet._hat_image()
+                    if head is None:
+                        self.assertIsNone(got)
+                        continue
+                    _, r = got
+                    self.assertGreaterEqual(r.top(), 0, (name, i))          # the window has room
+                    f = self.pet._frame_pos(self.pet.frame)
+                    top = f.y() + head[1] * s
+                    self.assertEqual(r.top(), top - ay * s, (name, i))
+                    cx = a.w - head[0] if mirror else head[0]                 # the centre line
+                    self.assertAlmostEqual((r.left() + r.right() + 1) / 2, f.x() + cx * s,
+                                           delta=(frames[0].width() / 2 + 1) * s, msg=(name, i))
+
+    def test_the_idle_hat_is_where_the_art_says(self):
+        self.pet.prefs["hat"] = "santa_hat"
+        self.pet.pose("idle")
+        _, r = self.pet._hat_image()
+        s = self.pet.scale
+        _, (ax, ay) = self.pet.sp.hats["santa_hat"]
+        self.assertEqual((r.left(), r.top()), (self.pet.home_px.x() + (12 - ax) * s,
+                                               self.pet.home_px.y() - ay * s))
+
+    def picks(self, n=400):
+        from collections import Counter
+        return Counter(self.pet._pick_action() for _ in range(n))
+
+    def test_nights_are_sleepier(self):
+        self.pet.wall = at(14)
+        day = self.picks()
+        self.pet.wall = at(23, 30)
+        night = self.picks()
+        self.assertEqual(day["yawn"], 0)
+        self.assertGreater(night["yawn"], 10)
+        self.assertGreater(night["sleep"], day["sleep"] + 20)
+        self.assertLess(night["dance"] + night["race"], day["dance"] + day["race"])
+        self.assertEqual(self.pet._rest_range(), cp.REST_SLEEPY)
+
+    def test_morning_coffee_once_a_day_while_you_are_there(self):
+        self.pet.wall = at(8)
+        self.pet.action = "idle"
+        self.pet._next()
+        self.assertEqual(self.pet.action, "morning")
+        self.assertTrue(run_ms(self.pet, 6000, until=lambda: "mug_held" in self.pet.layers))
+        self.pet.action = "idle"
+        self.pet._next()
+        self.assertNotEqual(self.pet.action, "morning")            # already had it today
+        self.pet._morning = None
+        self.pet._input_at = self.pet.now - 5 * 60_000              # nobody's there yet
+        self.pet.action = "idle"
+        self.pet._next()
+        self.assertNotEqual(self.pet.action, "morning")
+
+    def test_coffee_steams_and_he_sips(self):
+        self.pet.play("coffee")
+        faces, steam = set(), set()
+        for _ in range(int(9000 / 16)):
+            self.pet.advance(16)
+            faces.add(self.pet.frame[1])
+            steam |= {k for k in self.pet.layers if k.startswith("steam")}
+        self.assertIn("happy", faces)
+        self.assertEqual(len(steam), 3)
+
+    def test_a_yawn_is_a_stretch(self):
+        self.pet.play("yawn")
+        seen = set()
+        run_ms(self.pet, 3000, until=lambda: seen.add(self.pet.frame[1]) or self.pet.action != "yawn")
+        self.assertIn("stretch", seen)
+
+    def test_his_zs_clear_the_nightcap(self):
+        self.pet.wall = at(23, 30)
+        self.pet.start("sleep")
+        run_ms(self.pet, 4000)
+        _, r = self.pet._hat_image()
+        zs = [self.pet._glyph_rect(q) for q in self.pet.particles if q["kind"].startswith("z_")]
+        self.assertTrue(zs)
+        self.assertFalse(any(z.intersects(r) for z in zs))
+
+
+class Holidays(unittest.TestCase):
+    def setUp(self):
+        random.seed(8)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.pet.start("idle")
+        run_ms(self.pet, 100)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def confetti(self):
+        return [q for q in self.pet.particles if q["kind"].startswith("confetti")]
+
+    def test_confetti_only_in_his_party_hat(self):
+        self.pet.play("jump_happy")
+        self.pet.advance(16)
+        self.assertEqual(self.confetti(), [])
+        self.pet.prefs["hat"] = "party_hat"
+        self.pet.play("jump_happy")
+        self.pet.advance(16)
+        self.assertGreater(len(self.confetti()), 5)
+        run_ms(self.pet, 400)
+        self.assertTrue(all(q["vy"] > -15 for q in self.confetti()))     # falling back down
+
+    def test_he_sees_the_new_year_in_once(self):
+        self.pet.wall = at(0, 5, day=datetime.date(2027, 1, 1))
+        self.pet.action = "idle"
+        self.pet._next()
+        self.assertEqual(self.pet.action, "new_year")
+        self.assertEqual(self.pet.hat(), "party_hat")
+        self.pet.advance(16)
+        self.assertTrue(self.confetti())
+        self.pet.action = "idle"
+        self.pet._next()
+        self.assertNotEqual(self.pet.action, "new_year")
+
+    def test_bats_flap_past_in_pumpkin_week(self):
+        self.pet.wall = at(16, day=datetime.date(2026, 10, 29))
+        self.assertEqual(self.pet.hat(), "pumpkin_hat")
+        self.pet._bats()
+        kinds, xs = set(), []
+        for _ in range(40):
+            self.pet._age_particles(16)
+            bats = [q for q in self.pet.particles if q.get("flap")]
+            kinds |= {q["kind"] for q in bats}
+            xs.append(bats[0]["x"])
+        self.assertEqual(kinds, {"bat_0", "bat_1"})
+        self.assertNotEqual(xs[0], xs[-1])
+
+
+class Reminders(unittest.TestCase):
+    def setUp(self):
+        random.seed(6)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.pet.show()
+        self.pet.start("idle")
+        run_ms(self.pet, 100)
+        self.launched = []
+        self.pet.launch_claude_code = lambda kind="continue": self.launched.append(kind)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.hide()
+        self.pet.deleteLater()
+
+    def water_due(self):
+        self.pet._water_at = self.pet.now - self.pet.prefs["water_every"] * 60_000 - 1
+        self.pet._input_at = self.pet.now
+
+    def test_water_time_interrupts_what_he_is_doing(self):
+        self.pet.claude_event({"event": "UserPromptSubmit", "session": "r"})
+        run_ms(self.pet, 500)
+        self.assertEqual(self.pet.action, "work")
+        self.water_due()
+        run_ms(self.pet, 1100)
+        self.assertEqual(self.pet.action, "remind_water")
+        self.pet.claude_event({"event": "PreToolUse", "session": "r", "tool": "Read"})
+        run_ms(self.pet, 500)
+        self.assertEqual(self.pet.action, "remind_water")          # Claude Code can wait
+        self.pet.claude_event({"event": "PermissionRequest", "session": "r", "tool": "Bash"})
+        run_ms(self.pet, 100)
+        self.assertEqual(self.pet.action, "attention")             # ...but not a permission
+
+    def test_he_hops_waving_the_bottle_and_holds_it_out(self):
+        self.water_due()
+        run_ms(self.pet, 1100)
+        lifts, bubble, droplets = set(), False, False
+        for _ in range(int(5000 / 16)):
+            self.pet.advance(16)
+            if "water_bottle" in self.pet.layers and self.pet.frame[1] == "cheer":
+                self.assertEqual(self.pet.layers["water_bottle"][1], cp.BOTTLE_UP[1] - self.pet.lift)
+                lifts.add(self.pet.lift)
+            bubble = bubble or any(q["kind"] == "water_bubble" for q in self.pet.particles)
+            droplets = droplets or any(q["kind"].startswith("droplet") for q in self.pet.particles)
+        self.assertIn(5, lifts)
+        self.assertTrue(bubble and droplets)
+
+    def test_a_click_says_seen_it_and_he_drinks(self):
+        self.water_due()
+        run_ms(self.pet, 1100)
+        click(self.pet)
+        self.assertEqual(self.pet.action, "drink")
+        self.assertEqual(self.launched, [])                         # no Claude Code this time
+        self.assertEqual(self.pet._water_at, self.pet.now)
+        self.assertTrue(run_ms(self.pet, 8000, until=lambda: self.pet.action != "drink"))
+        self.assertEqual(self.pet.lift, 0)
+        click(self.pet)
+        self.assertEqual(self.launched, ["continue"])               # back to normal
+
+    def test_ignored_it_comes_back_later(self):
+        self.water_due()
+        run_ms(self.pet, 1100)
+        self.assertTrue(run_ms(self.pet, cp.REMIND_FOR["water"] + 6000,
+                               until=lambda: self.pet.action != "remind_water"))
+        self.assertIsNone(self.pet._due_reminder())
+        self.pet.now = self.pet._snooze["water"] + 1
+        self.pet._input_at = self.pet.now
+        self.assertEqual(self.pet._due_reminder(), "remind_water")
+        for _ in range(2):                                          # third time unanswered: count again
+            self.pet._ignored("water")
+        self.assertIsNone(self.pet._due_reminder())
+        self.assertEqual(self.pet._water_at, self.pet.now)
+
+    def test_not_while_you_are_away_or_he_is_quiet(self):
+        self.water_due()
+        self.pet._input_at = self.pet.now - 3 * 60_000
+        self.assertIsNone(self.pet._due_reminder())
+        self.water_due()
+        self.pet.prefs["quiet"] = True
+        self.assertIsNone(self.pet._due_reminder())
+        self.pet.prefs["quiet"] = False
+        self.pet.prefs["water"] = False
+        self.assertIsNone(self.pet._due_reminder())
+
+    def test_a_break_after_an_hour_at_it(self):
+        self.pet.prefs["water"] = False
+        self.pet._streak_at = self.pet.now - 61 * 60_000
+        self.pet._input_at = self.pet.now
+        run_ms(self.pet, 1100)
+        self.assertEqual(self.pet.action, "remind_break")
+        self.assertTrue(any(q["kind"] == "break_bubble" for q in self.pet.particles))
+        click(self.pet)
+        self.assertEqual(self.pet.action, "coffee")                 # he takes one with you
+        self.assertEqual(self.pet._streak_at, self.pet.now)
+
+    def test_coming_back_from_a_break_restarts_the_count(self):
+        self.pet._streak_at = self.pet._water_at = 0.0
+        self.pet.now += cp.AWAY + 60_000
+        self.pet.cursor_moved(500, 500)
+        self.assertEqual(self.pet._streak_at, self.pet.now)
+        self.assertEqual(self.pet._water_at, self.pet.now)
+
+    def test_the_menu_previews_run_by_themselves(self):
+        self.pet.play("remind_water")
+        self.assertTrue(self.pet.manual)
+        self.assertTrue(run_ms(self.pet, 50_000, until=lambda: self.pet.action != "remind_water"))
 
 
 class Launcher(unittest.TestCase):

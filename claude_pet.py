@@ -13,7 +13,10 @@ Left-click: open Claude Code (the Code tab of the Claude app)
 Right-click: menu    Drag: pick him up and throw him    Stroke him: he likes it
 """
 
+import ast
+import datetime
 import json
+import math
 import os
 import random
 import re
@@ -80,11 +83,19 @@ LABELS = {
     "work": "Typing (Claude Code working)", "attention": "Calling you over (a permission)",
     "celebrate": "Celebrating (Claude Code done)",
     "perch_window": "Hop up onto a window", "hop_down": "Hop down from a window",
+    "yawn": "Yawn and stretch", "morning": "Good morning (stretch and coffee)", "coffee": "Coffee",
+    "remind_break": "Reminder: take a break", "remind_water": "Reminder: drink some water",
 }
-ON_A_WINDOW = ["walk", "wave", "jump", "jump_happy", "dance", "laptop", "sparkler", "sleep"]
+ON_A_WINDOW = ["walk", "wave", "jump", "jump_happy", "dance", "laptop", "sparkler", "sleep", "yawn"]
+LIVELY = ("dance", "race", "sparkler", "jump", "jump_happy", "cloud")   # calmer at night
+BOUNCY = {"walk", "dance", "jump", "jump_happy", "celebrate", "race", "wave"}   # a hat's pom-pom swings
 AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["perch_window", "hop_down", "visit", "read"]
 CLAUDE_PREVIEWS = ["work", "attention", "celebrate"]
-PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + ["idle"])
+TIME_SCENES = ["yawn", "morning", "coffee", "remind_break", "remind_water"]
+PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + TIME_SCENES + ["idle"])
+
+EXTRAS_FILE = os.path.join(HERE, "sprites", "extras.py")
+HATS = {"santa_hat": "Santa hat", "pumpkin_hat": "Pumpkin", "party_hat": "Party hat", "nightcap": "Nightcap"}
 
 # ── Settings ────────────────────────────────────────────────────────
 
@@ -97,6 +108,7 @@ PREF_DEFAULTS = {
     "duck": True,             # drops out of sight for fullscreen windows
     "day_cycle": True,        # yawns and naps at night, coffee in the morning
     "seasons": True,          # hats and extras on holidays
+    "hat": "auto",            # auto (by date and time) | none | one of HATS
     "breaks": True,           # break reminders...
     "break_every": 60,        # ...after this many minutes at the computer
     "water": True,            # water reminders...
@@ -106,7 +118,7 @@ ACTIVITY = {"calm": 2.0, "normal": 1.0, "lively": 0.5}      # multiplies the res
 OWN_SCENES = [["walk", "wave", "jump", "jump_happy", "dance", "laptop"],
               ["sparkler", "cloud", "race", "lurk", "sleep"],
               ["climb", "leap", "perch_window", "visit", "read"]]
-OWN_SCENE_ACTIONS = {k for col in OWN_SCENES for k in col} - {"sleep"}
+OWN_SCENE_ACTIONS = ({k for col in OWN_SCENES for k in col} - {"sleep"}) | {"yawn", "morning", "coffee"}
 
 
 class Prefs:
@@ -142,6 +154,7 @@ class Prefs:
 # Where the eyes sit in the idle pose (top-left of each 2x2 eye).
 EYES = ((6, 2), (16, 2))
 
+BODY = (216, 119, 86)         # Clawd's own colour, #d87756
 INK = (20, 20, 19)            # Anthropic's near-black, as in the official art
 IVORY = (250, 249, 245)
 BLUE = (106, 155, 204)        # Claude Code's own "professional blue"
@@ -215,6 +228,16 @@ LADDER_PALETTE = {"d": RAIL_DARK, "l": RAIL_LIGHT}
 CURSOR_NEAR = 70              # sprite pixels: how close the pointer must be for him to watch it
 GLANCE_MS = 1400
 ARMS_UP = ("anim", "jump", 2, False)   # a folder is being dragged over him: "for me?"
+AWAY = 10 * 60_000            # no pointer movement or prompt for this long: you're away (a break)
+PRESENT = 90_000              # reminders only come while you've done something this recently
+REMIND_FOR = {"water": 120_000, "break": 180_000}   # how long he keeps at a reminder
+SNOOZE = 10 * 60_000          # an ignored reminder comes back after this
+REMINDERS = ("remind_water", "remind_break")
+BUBBLES = {"bubble", "water_bubble", "break_bubble"}
+MUG_AT = (22, 1)              # the mug in his right hand, handle in his grip (idle cells)
+BOTTLE_UP = (16, -15)         # the bottle held up high in the cheering frame
+BOTTLE_SIDE = (21, -1)        # ...and at his side, standing
+BOTTLE_CROUCH = (21, 3)       # ...and at his side, crouching
 DRAG_FORGET = 10_000                   # ms without drag events before he stops waiting              # a look up from the laptop at a nearby pointer lasts this long
 GLANCE_COOLDOWN = 6000        # ...and won't happen again for this long (just a moment each time)
 TYPING_EYES = ((12, 12), (20, 12))    # the eyes in Clawd-Laptop's typing frames (3/4 view)
@@ -265,6 +288,69 @@ def grid_image(rows, palette):
                 r, g, b = palette[ch]
                 buf[base + x * 4:base + x * 4 + 4] = bytes((r, g, b, 255))
     return QImage(bytes(buf), w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
+
+
+def load_extras(path=EXTRAS_FILE):
+    """sprites/extras.py's EXTRAS (hats and props), read as plain data: the
+    file is parsed, never imported or run."""
+    with open(path) as f:
+        tree = ast.parse(f.read(), path)
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "EXTRAS" for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise ValueError("no EXTRAS in " + path)
+
+
+def wall_clock():
+    return datetime.datetime.now()
+
+
+def season_hat(day):
+    """The hat for a date: a party hat for New Year, a Santa hat in December,
+    a pumpkin in the week before Halloween."""
+    if (day.month, day.day) in ((12, 31), (1, 1)):
+        return "party_hat"
+    if day.month == 12:
+        return "santa_hat"
+    if day.month == 10 and day.day >= 24:
+        return "pumpkin_hat"
+    return None
+
+
+def rgb(hex_colour):
+    return int(hex_colour[1:3], 16), int(hex_colour[3:5], 16), int(hex_colour[5:7], 16)
+
+
+HEAD_W = 16                   # cells across the top of his head in the idle pose
+
+
+def head_of(rows, body, home_y=0):
+    """Where a hat goes on a frame: (the cell just right of his head's centre
+    line, his head's top row), from the widest run of body cells on the
+    topmost row that has one of 8 or more (arms are narrower). Peeking in from
+    the side, his head is cut off by the frame's edge: then any run touching
+    the edge near where his head belongs counts, as a full head's width
+    across. None if no head shows."""
+    for y, row in enumerate(rows):
+        best, x = None, 0
+        while x < len(row):
+            if row[x] not in body:
+                x += 1
+                continue
+            x0 = x
+            while x < len(row) and row[x] in body:
+                x += 1
+            cut = (x0 == 0 or x == len(row)) and x - x0 >= 2 and y <= home_y + 4
+            if (x - x0 >= 8 or cut) and (best is None or x - x0 > best[1] - best[0]):
+                best = (x0, x)
+        if best is not None:
+            x0, x1 = best
+            if x0 == 0 and x1 - x0 < HEAD_W:
+                x0 = x1 - HEAD_W
+            elif x1 == len(row) and x1 - x0 < HEAD_W:
+                x1 = x0 + HEAD_W
+            return (x0 + x1) // 2, y
+    return None
 
 
 def flipped(img):
@@ -367,6 +453,37 @@ def typing_eyes(rows, kind, body, ink):
     return ["".join(r) for r in g]
 
 
+def squeezed_eyes(rows, body, ink):
+    """Eyes squeezed shut, > <, for a big stretch or a yawn."""
+    g = [list(r) for r in rows]
+    mid = len(g[0]) / 2
+    cells = [(x, y) for y, r in enumerate(g) for x, c in enumerate(r) if c == ink]
+    for left in (True, False):
+        eye = [(x, y) for x, y in cells if (x < mid) == left]
+        if not eye:
+            continue
+        x0, x1 = min(x for x, _ in eye), max(x for x, _ in eye)
+        y0 = min(y for _, y in eye)
+        for x, y in eye:
+            g[y][x] = body
+        tip = (x0 + 1, x1 - 1)[not left]
+        edge = (x0, x1)[not left]
+        for x, y in ((edge, y0), (tip, y0 + 1), (edge, y0 + 2)):
+            g[y][x] = ink
+    return ["".join(r) for r in g]
+
+
+def reach_rows(rows, body, n=1):
+    """Arms up, reaching n cells higher: the top row of his raised arms, repeated."""
+    g = [list(r) for r in rows]
+    top = next(y for y, r in enumerate(g) if body in r)
+    for k in range(1, n + 1):
+        for x, c in enumerate(g[top]):
+            if c == body:
+                g[top - k][x] = body
+    return ["".join(r) for r in g]
+
+
 def poke_rows(idle):
     """Poking with the right arm stretched out: 3 px further, a pixel thinner."""
     body = idle[0][4]
@@ -418,6 +535,8 @@ class Anim:
         self.outro = tuple(data["outro"]) if "outro" in data else None
         self.frames = [grid_image(f["rows"], palette) for f in data["frames"]]
         self.ms = [f["ms"] for f in data["frames"]]
+        body = {k for k, v in palette.items() if v == BODY}
+        self.heads = [head_of(f["rows"], body, self.home[1]) for f in data["frames"]]
 
 
 class Sprites:
@@ -449,6 +568,17 @@ class Sprites:
                 "size": laptop["size"], "home": laptop["home"], "loop": [0, len(typing) - 1],
                 "frames": [{"ms": f["ms"], "rows": typing_eyes(f["rows"], kind, body, ink)} for f in typing]},
                 palette)
+        # Clawd-Jumping's arms-up frame brought down to the floor: cheering
+        # (its own wide eyes) and stretching (eyes squeezed shut)
+        up = jump["frames"][2]["rows"]
+        drop = hy + self.ih - 1 - max(y for y, r in enumerate(up) if r.strip("."))
+        grounded = ["." * len(up[0])] * drop + up[:len(up) - drop]
+        squeezed = squeezed_eyes(grounded, body, ink)
+        # A stretch reaches higher than a cheer: well clear of a hat's brim
+        stretch = [reach_rows(squeezed, body, 2), reach_rows(squeezed, body, 3)]
+        for name, frames in (("cheer", [grounded]), ("stretch", stretch)):
+            self.anims[name] = Anim(name, {"size": jump["size"], "home": jump["home"],
+                                           "frames": [{"ms": 300, "rows": r} for r in frames]}, palette)
         self.anims["poke"] = Anim("poke", {
             "size": [self.iw + 3, self.ih], "home": [0, 0],
             "frames": [{"ms": 180, "rows": poke_rows(idle)}]}, palette)
@@ -458,6 +588,27 @@ class Sprites:
         self.glyphs = {k: grid_image(rows, pal) for k, (rows, pal) in GLYPHS.items()}
         self.props = {k: grid_image(rows, pal) for k, (rows, pal) in PROPS.items()}
         self.props["cloud"], self.cloud_at = cloud_platform(data, palette)
+        self.pose_head = head_of(idle, {idle[0][4]})
+        # Hats and seasonal props from sprites/extras.py
+        extras = load_extras()
+
+        def images(name):
+            e = extras[name]
+            pal = {k: rgb(v) for k, v in e["palette"].items()}
+            return [grid_image(rows, pal) for rows in e["frames"]]
+        self.hats = {n: (images(n), tuple(extras[n]["anchor"])) for n in HATS}
+        self.hats_flipped = {n: [flipped(img) for img in frames] for n, (frames, _) in self.hats.items()}
+        for name in ("mug", "water_bottle", "break_bubble", "water_bubble"):
+            self.props[name] = images(name)[0]
+        self.props["mug_held"] = flipped(self.props["mug"])         # handle toward his hand
+        if "water_bottle_tilt" in extras:
+            self.props["water_bottle_tilt"] = images("water_bottle_tilt")[0]
+            self.bottle_cap = tuple(extras["water_bottle_tilt"]["cap"])
+        for name in ("break_bubble", "water_bubble"):
+            self.glyphs[name] = self.props[name]
+        for name in ("steam", "bat", "confetti", "droplet"):
+            for i, img in enumerate(images(name)):
+                (self.props if name == "steam" else self.glyphs)[f"{name}_{i}"] = img
 
 
 def cloud_platform(data, palette):
@@ -1134,6 +1285,16 @@ class ClawdPet(QWidget):
         self.setMouseTracking(True)            # hovering over him counts as the pointer being near
         self.setAcceptDrops(True)              # drop a folder on him: a Claude Code session there
         self.prefs = Prefs(settings)
+        self.wall = wall_clock                 # the date and time (tests set their own)
+        self._hat_on = False                   # is a hat drawn on this frame
+        self._morning = None                   # the day he last had his morning coffee
+        self._new_year = None                  # the year he last saw in
+        self._input_at = 0.0                   # when you last moved the pointer or sent a prompt
+        self._streak_at = 0.0                  # since when you've been at it without a break
+        self._water_at = 0.0                   # when you last had water (or he started)
+        self._snooze = {"water": 0.0, "break": 0.0}
+        self._ignores = {"water": 0, "break": 0}
+        self._remind_checked = 0.0
         self.catcher = None                    # his DropCatcher, on KDE Wayland
         self._drag_over = False
         self._drag_seen = 0.0
@@ -1214,6 +1375,7 @@ class ClawdPet(QWidget):
     def _layout(self):
         """Size the window to fit every animation, mirrored or not."""
         left, right, top, bottom = 0, self.iw, 14, self.ih   # 14: room for Z's and hearts
+        hat_up = max(anchor[1] for _, anchor in self.sp.hats.values()) + 1
         for a in self.sp.anims.values():
             hx, hy = a.home
             for lft in (hx, a.w - hx - self.iw):
@@ -1221,6 +1383,10 @@ class ClawdPet(QWidget):
                 right = max(right, a.w - lft)
             top = max(top, hy)
             bottom = max(bottom, a.h - hy)
+            for head in a.heads:                 # and a hat on his head, however high it gets
+                if head is not None:
+                    top = max(top, hy - head[1] + hat_up)
+        top = max(top, -BOTTLE_UP[1] + 5 + 4)   # a water bottle held up high, mid-hop, splashing
         s = self.scale
         # Room beside him for an icon he's inspecting and the magnifying glass
         # going over it (the window is click-through outside what's drawn).
@@ -1462,6 +1628,8 @@ class ClawdPet(QWidget):
         self.manual = manual
         if manual:
             self._last_activity = self.now
+        if self.action in REMINDERS:
+            self.lift = 0                       # stopped mid-hop: he lands, rather than hanging there
         self._leave_cloud()                     # interrupted mid-scene: drop the props
         self.layers = {}
         self.vx = 0.0 if not self.airborne else self.vx
@@ -1484,6 +1652,8 @@ class ClawdPet(QWidget):
             self.start("duck")
         elif mode == "attention":
             self.start("attention")
+        elif self._due_reminder():
+            self.start(self._due_reminder())
         elif mode == "busy":
             self.start("work")
         elif self.celebrate is not None:
@@ -1491,13 +1661,16 @@ class ClawdPet(QWidget):
         elif self.greet:
             self.greet = False
             self.start("wave")
+        elif self.action == "idle" and self._new_year_due():
+            self.start("new_year")
         elif self.action == "idle":
-            self.start(self._pick_action())
+            self.start("morning" if self._morning_due() else self._pick_action())
         else:
             self.start("idle")
 
     def _rest_range(self):
-        lo, hi = REST_SLEEPY if self.now - self._last_activity > WIND_DOWN else REST
+        sleepy = self.now - self._last_activity > WIND_DOWN or (self.prefs["day_cycle"] and self.is_night())
+        lo, hi = REST_SLEEPY if sleepy else REST
         k = ACTIVITY.get(self.prefs["activity"], 1.0)
         return lo * k, hi * k
 
@@ -1518,6 +1691,12 @@ class ClawdPet(QWidget):
         if self.prefs["quiet"]:                    # keeps to himself: a nap at most
             return "sleep" if drowsy and "sleep" not in off and random.random() < 0.3 else "idle"
         weights = self._scene_weights(drowsy)
+        if self.prefs["day_cycle"] and self.is_night():   # late: yawns, naps, nothing too wild
+            for k in LIVELY:
+                if k in weights:
+                    weights[k] *= 0.3
+            weights["sleep"] = max(weights.get("sleep", 0), 20)
+            weights["yawn"] = 10
         weights = {k: v for k, v in weights.items() if v > 0 and (k not in off or k == "hop_down")}
         if not weights:
             return "idle"
@@ -1581,6 +1760,9 @@ class ClawdPet(QWidget):
             p = QCursor.pos()
             if self.cursor is None or (p.x(), p.y()) != self.cursor[:2]:
                 self.cursor_moved(p.x(), p.y())
+        if self.now - self._remind_checked >= 1000:
+            self._remind_checked = self.now
+            self._maybe_remind()
         if waiting:
             self.frame = ARMS_UP                 # "for me?"
         else:
@@ -1722,6 +1904,8 @@ class ClawdPet(QWidget):
         self.last_message = msg
         self._last_activity = self.now
         ev, sid = msg.get("event", ""), msg.get("session") or "?"
+        if ev == "UserPromptSubmit":
+            self._user_active()
         s = self.sessions.setdefault(sid, {"state": "idle", "since": self.now, "seen": self.now})
         s["seen"] = self.now
         if ev in BUSY_EVENTS:
@@ -1767,6 +1951,8 @@ class ClawdPet(QWidget):
         # Anything else he's doing is his own idea, so Claude Code comes first,
         # even halfway up a ladder: the props vanish and he drops to the floor.
         mode = self.claude_mode()
+        if self.action in REMINDERS and mode != "attention":
+            return                                 # a reminder is for you: only a permission cuts in
         if mode == "attention" and self.action != "attention":
             self.start("attention")
         elif mode == "busy" and self.action not in ("work", "attention"):
@@ -1779,6 +1965,8 @@ class ClawdPet(QWidget):
         """Something you asked for (menu or socket): runs to the end."""
         if action in ("work", "attention"):
             self.start(action, manual=True, demo=True)
+        elif action in REMINDERS:
+            self.start(action, manual=True, preview=True)
         else:
             self.start(action, manual=True)
 
@@ -1793,6 +1981,8 @@ class ClawdPet(QWidget):
     def cursor_moved(self, x, y):
         prev = self.cursor
         self.cursor = (x, y, self.now)
+        if prev is None or (x, y) != prev[:2]:
+            self._user_active()
         left, right = self.box_span()
         top = self.y + self.home_px.y()
         m = 2 * self.scale
@@ -1865,20 +2055,28 @@ class ClawdPet(QWidget):
     def pose(self, name):
         self.frame = ("pose", name, False)
 
-    def _emit(self, kind, x, y, vx=0.0, vy=0.0, life=3000.0, g=0.0):
+    def _emit(self, kind, x, y, vx=0.0, vy=0.0, life=3000.0, g=0.0, flap=None):
         self.particles.append({"kind": kind, "x": x, "y": y, "y0": y, "age": 0.0,
-                               "life": life, "vx": vx, "vy": vy, "g": g})
+                               "life": life, "vx": vx, "vy": vy, "g": g, "flap": flap})
 
-    def _bubble(self, on):
-        self.particles = [q for q in self.particles if q["kind"] != "bubble"]
+    def _bubble(self, on, kind="bubble"):
+        """A speech bubble over his right shoulder ("!", coffee, water), moved
+        clear of his hat. The bigger ones sit clear of a raised right arm too."""
+        self.particles = [q for q in self.particles if q["kind"] not in BUBBLES]
         if on:
-            self._emit("bubble", self.iw - 8, -13.0, life=float("inf"))
+            g = self.sp.glyphs[kind]
+            x = self.iw - 1 if kind != "bubble" else self.iw - (3 if self.hat() else 8)
+            self._emit(kind, x, -2.0 - g.height(), life=float("inf"))
 
     def _age_particles(self, dt):
         for q in self.particles:
             q["age"] += dt
-            if q["kind"] == "bubble":
+            if q["kind"] in BUBBLES:
                 q["y"] = q["y0"] - (q["age"] // 400) % 2      # a gentle bob
+            elif q.get("flap"):                                # a bat: wings up, wings down, bobbing
+                q["kind"] = q["flap"][int(q["age"] // 130) % len(q["flap"])]
+                q["x"] += q["vx"] * dt / 1000
+                q["y"] = q["y0"] + 1.5 * math.sin(q["age"] / 160)
             else:
                 q["vy"] += q.get("g", 0.0) * dt / 1000
                 q["x"] += q["vx"] * dt / 1000
@@ -1915,12 +2113,91 @@ class ClawdPet(QWidget):
                      img.width() * s, img.height() * s)
 
     def _extras(self):
-        """Props, then the cloud in front of him, as (image, rect)."""
+        """His hat, props, then the cloud in front of him, as (image, rect)."""
         out = [(self.sp.props[n], self._prop_rect(self.sp.props[n], x, y)) for n, (x, y) in self.layers.items()]
+        hat = self._hat_image()
+        if hat is not None:
+            out.insert(0, hat)
         if self.front is not None:
             cloud = self.sp.props["cloud"]
             out.append((cloud, self._prop_rect(cloud, *self.front)))
         return out
+
+    # ── Hats ──────────────────────────────────────────────────────
+
+    def is_night(self):
+        h = self.wall().hour
+        return h >= 22 or h < 6
+
+    def is_morning(self):
+        return 6 <= self.wall().hour < 11
+
+    def hat(self):
+        """The hat he's wearing right now, or None."""
+        choice = self.prefs["hat"]
+        if choice in HATS:
+            return choice
+        if choice != "auto":
+            return None
+        if self.prefs["day_cycle"] and self.action == "sleep" and self.is_night():
+            return "nightcap"
+        if self.prefs["seasons"]:
+            return season_hat(self.wall().date())
+        return None
+
+    def _hat_key(self):
+        """Which hat, and which of its frames: the Santa hat's pom-pom and the
+        nightcap's tail swing as he moves (slowly while he sleeps)."""
+        name = self.hat()
+        if name is None:
+            return None
+        n = len(self.sp.hats[name][0])
+        if self.action == "sleep":
+            k = int(self.now // 1400) % n
+        elif self.vx or self.action in BOUNCY:
+            k = int(self.now // 260) % n
+        else:
+            k = 0
+        return name, k
+
+    def _head(self):
+        """(his head in the current frame's cells, the frame's width, mirrored?)"""
+        kind = self.frame
+        if kind[0] == "anim":
+            anim = self.sp.anims[kind[1]]
+            return anim.heads[kind[2]], anim.w, kind[3]
+        return self.sp.pose_head, self.iw, kind[2]
+
+    def _reaching_up(self):
+        """Where the frame reaches up past his head: everything above its top,
+        and beside it for the next 4 rows (arms raised), in window pixels."""
+        (cx, top), w, mirror = self._head()
+        head_left = w - cx - HEAD_W // 2 if mirror else cx - HEAD_W // 2
+        s = self.scale
+        at = self._frame_pos(self.frame)
+        region = QRegion(0, 0, w * s, (top + 4) * s).subtracted(
+            QRegion(head_left * s, top * s, HEAD_W * s, 4 * s))
+        return region.translated(at)
+
+    def _hat_image(self):
+        key = self._hat_key()
+        self._hat_on = False
+        if key is None:
+            return None
+        frames, (ax, ay) = self.sp.hats[key[0]]
+        img = frames[key[1]]
+        kind = self.frame
+        head, w, mirror = self._head()
+        if head is None:
+            return None
+        self._hat_on = True
+        cx, top = head
+        x = cx - ax                               # in the unmirrored frame's cells
+        if mirror:
+            x, img = w - x - img.width(), self.sp.hats_flipped[key[0]][key[1]]
+        s = self.scale
+        at = self._frame_pos(kind)
+        return img, QRect(at.x() + x * s, at.y() + (top - ay) * s, img.width() * s, img.height() * s)
 
     def _glyph_rect(self, q):
         s = self.scale
@@ -1931,7 +2208,7 @@ class ClawdPet(QWidget):
     def _refresh(self):
         """Repaint (and re-shape the window) only when something visible changed."""
         extras = self._extras()
-        state = (self.frame, self.lift, tuple((r.x(), r.y(), r.width()) for _, r in extras),
+        state = (self.frame, self.lift, self._hat_key(), tuple((r.x(), r.y(), r.width()) for _, r in extras),
                  tuple((q["kind"], int(q["x"]), int(q["y"]), self._fade(q)) for q in self.particles))
         if state == self._shown:
             return
@@ -1956,9 +2233,17 @@ class ClawdPet(QWidget):
         self.update()
 
     def paint(self, p):
-        p.drawPixmap(self._frame_pos(self.frame), self._pixmap(self.frame))
-        for img, r in self._extras():
+        at, pm = self._frame_pos(self.frame), self._pixmap(self.frame)
+        p.drawPixmap(at, pm)
+        extras = self._extras()
+        for k, (img, r) in enumerate(extras):
             p.drawImage(r, img)
+            if k == 0 and self._hat_on:
+                # arms raised past his head come up in front of the hat's brim
+                p.save()
+                p.setClipRegion(self._reaching_up())
+                p.drawPixmap(at, pm)
+                p.restore()
         for q in self.particles:
             p.setOpacity(self._fade(q))
             p.drawImage(self._glyph_rect(q), self.sp.glyphs[q["kind"]])
@@ -2013,6 +2298,8 @@ class ClawdPet(QWidget):
 
     def _act_idle(self):
         self.pose("idle")
+        if self.hat() == "pumpkin_hat" and random.random() < 0.3:
+            self._bats()
         yield from self._come_back()
         end, t = random.uniform(*self._rest_range()), 0.0
         while t < end or self._engaged():         # while you're playing with him, he stays with you
@@ -2436,9 +2723,11 @@ class ClawdPet(QWidget):
 
     def _act_celebrate(self):
         took, self.celebrate = self.celebrate or 0, None
+        self._confetti()
         yield from self._once("sparkler" if took > 90_000 else "jump_happy")
 
     def _act_dance(self):
+        self._confetti()
         a = self.sp.anims["dance"]
         lo, hi = a.loop
         yield from self._play("dance", range(0, lo))
@@ -2459,7 +2748,41 @@ class ClawdPet(QWidget):
         yield from self._once("jump")
 
     def _act_jump_happy(self):
+        self._confetti()
         yield from self._once("jump_happy")
+
+    # ── Holidays ──────────────────────────────────────────────────
+
+    def _confetti(self, n=14):
+        """A burst of confetti, when he's in his party hat."""
+        if self.hat() != "party_hat":
+            return
+        for _ in range(n):
+            self._emit(f"confetti_{random.randrange(5)}", self.iw / 2 + random.uniform(-7, 7),
+                       random.uniform(-6, -2), vx=random.uniform(-10, 10), vy=random.uniform(-15, -7),
+                       g=30, life=1800)
+
+    def _bats(self):
+        """A bat or two flapping past, in his pumpkin week."""
+        for k in range(random.randint(1, 2)):
+            side = random.choice((-1, 1))
+            x = -18.0 if side > 0 else self.iw + 16.0
+            self._emit("bat_0", x - side * k * 7, random.uniform(-12, -5), vx=side * random.uniform(14, 20),
+                       life=3200, flap=("bat_0", "bat_1"))
+
+    def _new_year_due(self):
+        t = self.wall()
+        return (self.prefs["seasons"] and (t.month, t.day, t.hour) == (1, 1, 0) and t.minute < 15
+                and self._new_year != t.year)
+
+    def _act_new_year(self):
+        """Midnight on New Year's Eve: party hat, confetti and a dance."""
+        self._new_year = self.wall().year
+        yield from self._come_back()
+        for _ in range(3):
+            self._confetti(20)
+            yield from self._once("jump_happy")
+        yield from self._act_dance()
 
     def _act_sparkler(self):
         yield from self._once("sparkler")
@@ -2482,17 +2805,212 @@ class ClawdPet(QWidget):
         yield from self._walk_to(geo.left() + back if side < 0 else right_edge - width - back)
         self.offscreen = False
 
+    # ── Time of day ───────────────────────────────────────────────
+
+    def _stretch(self, hold=1300):
+        """Crouch, arms right up with his eyes squeezed shut, reaching higher
+        and back a few times, and down again."""
+        self.show_frame("jump", 1)
+        yield 180
+        t, k = 0, 0
+        while t < hold:
+            self.show_frame("stretch", k % 2)
+            step = 260 if k % 2 == 0 else 380
+            yield step
+            t, k = t + step, k + 1
+        self.show_frame("jump", 1)
+        yield 160
+
+    def _act_yawn(self):
+        yield from self._stretch()
+        self.pose("blink")                         # still half asleep
+        yield 700
+        if self.is_night():
+            x, y = self._z_spot()
+            self._emit("z_small", x, y, vx=0.7, vy=-2.0, life=2500)
+        self.pose("idle")
+        yield 600
+
+    def _morning_due(self):
+        return (self.prefs["day_cycle"] and not self.prefs["quiet"] and self.is_morning()
+                and self._morning != self.wall().date() and self.now - self._input_at < PRESENT)
+
+    def _act_morning(self):
+        """Good morning: a big stretch, a happy face, then coffee."""
+        self._morning = self.wall().date()
+        yield from self._come_back()
+        yield from self._stretch(1600)
+        self.pose("happy")
+        yield 900
+        yield from self._act_coffee()
+
+    def _act_coffee(self, stay=None):
+        """A steaming mug in his right hand; a sip now and then, a look around."""
+        yield from self._come_back()
+        end = stay if stay is not None else random.uniform(25_000, 45_000)
+        mx, my = MUG_AT
+        self.pose("idle")
+        t, k, face_until, next_sip = 0.0, 0, 0.0, random.uniform(2000, 4000)
+        while t < end:
+            self.layers = {"mug_held": (mx, my), f"steam_{k % 3}": (mx + 2, my - 5)}
+            k += 1
+            if t >= next_sip:
+                self.pose("happy")                 # a sip: mmm
+                face_until, next_sip = t + 1300, t + random.uniform(4000, 8000)
+            elif t >= face_until and self.frame[1] != "idle":
+                self.pose("idle")
+            elif t >= face_until and random.random() < 0.04:
+                self.pose(self._glance())
+                face_until = t + 900
+            yield 330
+            t += 330
+        self.layers = {}
+        self.pose("idle")
+        yield 300
+
+    # ── Reminders ─────────────────────────────────────────────────
+
+    def _user_active(self):
+        """You did something: moved the pointer, sent a prompt, clicked him."""
+        if self.now - self._input_at > AWAY:       # back from a break: start counting afresh
+            self._streak_at = self._water_at = self.now
+        self._input_at = self.now
+
+    def _due_reminder(self):
+        if (self.prefs["quiet"] or self.ducked or not self.isVisible()
+                or self.now - self._input_at > PRESENT):
+            return None
+        if (self.prefs["water"] and self.now >= self._snooze["water"]
+                and self.now - self._water_at >= self.prefs["water_every"] * 60_000):
+            return "remind_water"
+        if (self.prefs["breaks"] and self.now >= self._snooze["break"]
+                and self.now - self._streak_at >= self.prefs["break_every"] * 60_000):
+            return "remind_break"
+        return None
+
+    def _maybe_remind(self):
+        """Break into whatever he's doing on his own (or for Claude Code) for a reminder."""
+        due = self._due_reminder()
+        if (due and not self.manual and not self.dragging and not self.airborne
+                and self.action not in REMINDERS + ("held", "fall", "duck", "attention")
+                and self.claude_mode() != "attention"):
+            self.start(due)
+
+    def acknowledge(self):
+        """You clicked him mid-reminder: seen it. He has a drink, or a coffee break with you."""
+        kind = "water" if self.action == "remind_water" else "break"
+        self._ignores[kind] = 0
+        self._snooze[kind] = 0.0
+        if kind == "water":
+            self._water_at = self.now
+            self.start("drink", manual=True)
+        else:
+            self._streak_at = self.now
+            self.start("coffee", manual=True, stay=random.uniform(12_000, 20_000))
+
+    def _ignored(self, kind):
+        """Nobody clicked: try again in a while, and after three goes, start the count again."""
+        self._ignores[kind] += 1
+        if self._ignores[kind] >= 3:
+            self._ignores[kind] = 0
+            if kind == "water":
+                self._water_at = self.now
+            else:
+                self._streak_at = self.now
+        else:
+            self._snooze[kind] = self.now + SNOOZE
+
+    def _act_remind_water(self, preview=False):
+        """Water time, as loud as he gets: hops up and down waving a bottle, then
+        holds it out with a water bubble, looking at you, until you click him."""
+        yield from self._come_back()
+        end = self.now + (40_000 if preview else REMIND_FOR["water"])
+        while self.now < end:
+            for _ in range(3):
+                yield from self._hop_with_bottle()
+            self.layers = {"water_bottle": BOTTLE_SIDE}
+            self.pose(self._glance())
+            self._bubble(True, "water_bubble")
+            yield 1900
+            self._bubble(False)
+        self.layers = {}
+        self.pose("idle")
+        self._ignored("water")
+        yield 300
+
+    def _hop_with_bottle(self):
+        bx, by = BOTTLE_UP
+        self.show_frame("jump", 1)                 # crouch, bottle at his side
+        self.layers = {"water_bottle": BOTTLE_CROUCH}
+        yield 110
+        self.show_frame("cheer", 0)
+        for lift in (2, 4, 5, 5, 4, 2, 0):
+            self.lift = lift
+            self.layers = {"water_bottle": (bx, by - lift)}
+            if lift == 5 and random.random() < 0.8:   # a splash from the top of the bottle
+                for _ in range(2):
+                    self._emit(f"droplet_{random.randrange(3)}", bx + 3 + random.uniform(-1, 1), by - lift - 1,
+                               vx=random.uniform(-5, 5), vy=random.uniform(-9, -5), g=40, life=700)
+            yield 55
+        self.show_frame("jump", 1)
+        self.layers = {"water_bottle": BOTTLE_CROUCH}
+        yield 110
+
+    def _act_drink(self):
+        """Glug, glug: the bottle tipped up to his face, eyes happily shut."""
+        self.pose("happy")
+        tilt = self.sp.props.get("water_bottle_tilt")
+        if tilt is not None:
+            cx, cy = self.sp.bottle_cap
+            self.layers = {"water_bottle_tilt": (12 - cx, 5 - cy)}
+        else:
+            self.layers = {"water_bottle": BOTTLE_SIDE}
+        yield 2200
+        self.layers = {}
+        for k in range(3):
+            self._emit("heart", self.iw / 2 - 2 + random.uniform(-6, 6), -3.0,
+                       vx=random.uniform(-1, 1), vy=-4.0, life=1400)
+            yield 250
+        yield 600
+        self.pose("idle")
+        yield 300
+
+    def _act_remind_break(self, preview=False):
+        """Break time: the coffee bubble, a big stretch, a look and a wave, until you click him."""
+        yield from self._come_back()
+        end = self.now + (40_000 if preview else REMIND_FOR["break"])
+        self._bubble(True, "break_bubble")
+        while self.now < end:
+            yield from self._stretch(1100)
+            self.pose(self._glance())
+            yield 1400
+            yield from self._play("wave", range(len(self.sp.anims["wave"].frames)))
+            self.pose("idle")
+            yield 1600
+        self._bubble(False)
+        self._ignored("break")
+        yield 300
+
     def _act_sleep(self):
+        night = self.prefs["day_cycle"] and self.is_night()
+        if night:
+            yield from self._stretch()             # nightcap on, a big yawn, then off he goes
         self.pose("blink")
-        end, t, n = random.uniform(20000, 60000), 0.0, 0
+        end, t, n = random.uniform(60_000, 180_000) if night else random.uniform(20000, 60000), 0.0, 0
         while t < end:
             n += 1
-            self._emit("z_big" if n % 2 else "z_small", self.iw - 6 + random.random() * 2, -1.0,
-                       vx=0.7, vy=-2.0, life=3000)
+            x, y = self._z_spot()
+            self._emit("z_big" if n % 2 else "z_small", x, y, vx=0.7, vy=-2.0, life=3000)
             yield 1300
             t += 1300
         self.pose("idle")
         yield 400
+
+    def _z_spot(self):
+        """Where his Z's start: off his right shoulder, clear of any hat."""
+        if self.hat() is not None:
+            return self.iw - 2 + random.random(), -2.0
+        return self.iw - 6 + random.random() * 2, -1.0
 
     def _window_target(self):
         """A window top he could hop up onto: visible, above him, not too far."""
@@ -2926,6 +3444,7 @@ class ClawdPet(QWidget):
         self.start("fall")
 
     def mousePressEvent(self, e):
+        self._user_active()
         if e.button() == Qt.MouseButton.LeftButton:
             self._press = e.globalPosition().toPoint()
             self._grab = self._press - QPoint(int(self.x), int(self.y))
@@ -2959,6 +3478,8 @@ class ClawdPet(QWidget):
             vx = max(-limit, min(limit, (p1.x() - p0.x()) / dt))
             vy = max(-limit, min(limit, (p1.y() - p0.y()) / dt))
             self.drop(vx, vy)
+        elif not self.airborne and self.action in REMINDERS:
+            self.acknowledge()                     # seen it: no Claude Code this time
         elif not self.airborne:
             waking = self.action == "sleep"
             kind = self.click_kind()
@@ -3069,11 +3590,19 @@ class ClawdPet(QWidget):
         m.addAction("Open claude.ai").triggered.connect(lambda _=False: open_claude_web())
         m.addSeparator()
         play = m.addMenu("Play")
-        for group in (ACTIONS, AROUND_THE_DESKTOP, CLAUDE_PREVIEWS):
+        for group in (ACTIONS, AROUND_THE_DESKTOP, TIME_SCENES, CLAUDE_PREVIEWS):
             if play.actions():
                 play.addSeparator()
             for key in group:
                 play.addAction(LABELS[key]).triggered.connect(lambda _=False, k=key: self.play(k))
+        hats = m.addMenu("Hat")
+        hat_group = QActionGroup(hats)
+        for key, label in [("auto", "By the date and time"), ("none", "No hat")] + list(HATS.items()):
+            act = hats.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(self.prefs["hat"] == key)
+            hat_group.addAction(act)
+            act.triggered.connect(lambda _=False, k=key: self.set_pref("hat", k))
         size = m.addMenu("Size")
         group = QActionGroup(size)
         for label, s in SCALES.items():
@@ -3158,6 +3687,15 @@ class SettingsDialog(QDialog):
         lay.addWidget(self._check("day_cycle", "Time of day: yawns and naps at night, coffee in the morning"))
         lay.addWidget(self._check("seasons", "Holidays: Santa hat in December, pumpkin at Halloween, "
                                              "party hat at New Year"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Hat"))
+        self.hat = QComboBox()
+        for key, label in [("auto", "By the date and time"), ("none", "No hat")] + list(HATS.items()):
+            self.hat.addItem(label, key)
+        self.hat.setCurrentIndex(max(0, self.hat.findData(pet.prefs["hat"])))
+        self.hat.currentIndexChanged.connect(lambda _i: pet.set_pref("hat", self.hat.currentData()))
+        row.addWidget(self.hat, 1)
+        lay.addLayout(row)
         root.addWidget(box)
 
         box = QGroupBox("Reminders (click him when you've seen one)")
