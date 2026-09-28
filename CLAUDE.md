@@ -84,8 +84,9 @@ to what Claude Code is doing.
 - `clawd_hook.py`: the Claude Code hook (stdlib only, always exits 0 silently)
 - `tools/install_hooks.py`: adds/removes the hooks in `~/.claude/settings.json`
 - `sprites/clawd.json`: traced frames, palette, timings, loop points. Generated, don't hand-edit
-- `sprites/extras.py`: hand-drawn extras on the same grid (hats with anchors, mug, steam,
-  bottle, bubbles, bats, confetti, droplets). Plain data, parsed with `ast`, never imported
+- `sprites/extras.py`: hand-drawn extras on the same grid (hats with anchors, the stretch
+  pose with its head position, mug, steam, bottles, bubbles, bats, confetti, droplets).
+  Plain data, parsed with `ast`, never imported
 - `tools/fetch_official.py`: downloads the official Clawd GIFs from claude.ai into `assets/official/`
 - `tools/trace_official.py`: turns them into `sprites/clawd.json` and reports fidelity
 - `tests/test_pet.py`: `python -m unittest discover -s tests -v` (offscreen, no window appears)
