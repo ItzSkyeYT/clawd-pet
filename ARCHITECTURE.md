@@ -95,6 +95,25 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
 - Something fullscreen on his screen: `_act_duck` sinks him out of view, hides the
   window, and pops him back up when it's over
 
+## Climbing windows
+- `_climb_target()`: a window whose side comes down to within `CLIMB_JUMP` cells of his
+  feet, reachable along what he stands on, with a visible top span touching that edge to
+  stand on, and a clear column beside the edge (`_column_clear()`: no window stacked above
+  it, on a screen). `_climb_down_target()` does the same from the top of the window he's on
+- `_climb_side()` moves him hand over hand beside the edge (scripted), following the
+  window if it moves and falling if it goes; up top he hops in over the edge (`_arc_to`),
+  going down he stops at the floor below or lets go at the bottom of the side
+
+## The wallpaper
+- `plasma_wallpapers()` reads Plasma's desktop config: each containment's wallpaper
+  plugin, image and slideshow interval (900 s when unset). Plasma turns slideshows over
+  at whole multiples of the interval since 1970 (imagebackend.cpp, to keep screens in
+  step), so `next_slide_change()` is exact and a one-shot timer fires just after it. A
+  QFileSystemWatcher on the config (re-added after each save, which replaces the file)
+  catches wallpapers set by hand; `wallpapers_differ()` ignores anything but the picture
+- `wallpaper_changed()` starts the `startled` scene unless he's busy with something that
+  matters, at most once a minute; the `back` pose is his silhouette without eyes
+
 ## Drag and drop
 - KWin hands drags from Wayland apps only to X11 windows it *manages*
   (`pickDragTarget()` skips `!isClient()`), and Clawd is unmanaged. So on KDE Wayland a
@@ -121,8 +140,9 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
   reaches up past his head (raised arms) over the brim (`_reaching_up()`)
 - `hat()`: the menu/settings choice, else a nightcap for night naps, else
   `season_hat(date)`. `wall_clock()` is the only clock read (tests pin it)
-- Night (22:00-06:00): sleepy rests, yawns, naps weighted up, lively scenes down.
-  Morning (06:00-11:00): `_act_morning` once a day, when you're there
+- Night (`night_from` to `night_to`, minutes after midnight, 22:00-06:00 by default, may
+  or may not cross midnight): sleepy rests, yawns, naps weighted up, lively scenes down.
+  Morning (`night_to` to `morning_to`, until 11:00): `_act_morning` once a day, when you're there
 - `_confetti()` bursts when he wears the party hat; `_bats()` are particles that flap
   (`flap` frames) and bob as they cross
 

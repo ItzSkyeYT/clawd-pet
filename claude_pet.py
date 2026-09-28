@@ -41,14 +41,15 @@ if (sys.platform.startswith("linux") and os.environ.get("WAYLAND_DISPLAY")
     os.environ["QT_QPA_PLATFORM"] = "xcb"
     _FORCED_XCB = True
 
-from PyQt6.QtCore import (QElapsedTimer, QObject, QPoint, QRect, QSettings, Qt, QTimer,
+from PyQt6.QtCore import (QElapsedTimer, QFileSystemWatcher, QObject, QPoint, QRect, QSettings, Qt, QTime,
+                          QTimer,
                           pyqtClassInfo, pyqtSlot)
 from PyQt6.QtGui import (QActionGroup, QBitmap, QCursor, QGuiApplication, QIcon, QImage, QPainter,
                          QPixmap, QRegion)
 from PyQt6.QtNetwork import QLocalServer
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout,
                              QGroupBox, QHBoxLayout, QLabel, QMenu, QPushButton, QSpinBox,
-                             QSystemTrayIcon, QVBoxLayout, QWidget)
+                             QSystemTrayIcon, QTimeEdit, QVBoxLayout, QWidget)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SPRITES = os.path.join(HERE, "sprites", "clawd.json")
@@ -93,6 +94,7 @@ LABELS = {
     "work": "Typing (Claude Code working)", "attention": "Calling you over (a permission)",
     "celebrate": "Celebrating (Claude Code done)",
     "perch_window": "Hop up onto a window", "hop_down": "Hop down from a window",
+    "climb_window": "Climb up the side of a window", "climb_down": "Climb down the side of a window",
     "yawn": "Yawn and stretch", "morning": "Good morning (stretch and coffee)", "coffee": "Coffee",
     "remind_break": "Reminder: take a break", "remind_water": "Reminder: drink some water",
     "grab": "Grab the pointer",
@@ -100,7 +102,7 @@ LABELS = {
 ON_A_WINDOW = ["walk", "wave", "jump", "jump_happy", "dance", "laptop", "sparkler", "sleep", "yawn"]
 LIVELY = ("dance", "race", "sparkler", "jump", "jump_happy", "cloud")   # calmer at night
 BOUNCY = {"walk", "dance", "jump", "jump_happy", "celebrate", "race", "wave"}   # a hat's pom-pom swings
-AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["perch_window", "hop_down", "visit", "read"]
+AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["perch_window", "hop_down", "climb_window", "climb_down", "visit", "read"]
 CLAUDE_PREVIEWS = ["work", "attention", "celebrate"]
 TIME_SCENES = ["yawn", "morning", "coffee", "remind_break", "remind_water"]
 POINTER_SCENES = ["grab"]
@@ -121,6 +123,9 @@ PREF_DEFAULTS = {
     "grab": True,             # jumps up and hangs off a pointer that hangs around above him
     "duck": True,             # drops out of sight for fullscreen windows
     "day_cycle": True,        # yawns and naps at night, coffee in the morning
+    "night_from": 22 * 60,    # minutes after midnight: night starts...
+    "night_to": 6 * 60,       # ...and ends (and the morning begins)...
+    "morning_to": 11 * 60,    # ...and the morning ends
     "seasons": True,          # hats and extras on holidays
     "hat": "auto",            # auto (by date and time) | none | one of HATS
     "breaks": True,           # break reminders...
@@ -131,7 +136,7 @@ PREF_DEFAULTS = {
 ACTIVITY = {"calm": 2.0, "normal": 1.0, "lively": 0.08}     # multiplies the rest between scenes
 OWN_SCENES = [["walk", "wave", "jump", "jump_happy", "dance", "laptop"],
               ["sparkler", "cloud", "race", "lurk", "sleep"],
-              ["climb", "leap", "perch_window", "visit", "read"]]
+              ["climb", "leap", "perch_window", "climb_window", "visit", "read"]]
 OWN_SCENE_ACTIONS = ({k for col in OWN_SCENES for k in col} - {"sleep"}) | {"yawn", "morning", "coffee"}
 
 
@@ -261,6 +266,8 @@ LADDER_W = 10
 LADDER_PALETTE = {"d": RAIL_DARK, "l": RAIL_LIGHT}
 
 CURSOR_NEAR = 70              # sprite pixels: how close the pointer must be for him to watch it
+CLIMB_JUMP = 20               # cells: a window's side ending this far above his feet, he jumps up to
+WINDOW_CLIMB = 1.3            # up a window's side a little quicker than a ladder
 GLANCE_MS = 1400
 ARMS_UP = ("anim", "jump", 2, False)   # a folder is being dragged over him: "for me?"
 GRAB_REACH = 45               # cells above his head he'll jump up to the pointer from
@@ -354,6 +361,50 @@ def load_extras(path=EXTRAS_FILE):
         if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "EXTRAS" for t in node.targets):
             return ast.literal_eval(node.value)
     raise ValueError("no EXTRAS in " + path)
+
+
+PLASMA_DESKTOP_RC = os.path.expanduser("~/.config/plasma-org.kde.plasma.desktop-appletsrc")
+
+
+def plasma_wallpapers(path=PLASMA_DESKTOP_RC):
+    """{containment: (wallpaper plugin, image, slideshow interval in s or None)}
+    for Plasma's desktops, from its config (empty if there's none)."""
+    import configparser
+    cfg = configparser.ConfigParser(strict=False, interpolation=None, delimiters=("=",))
+    cfg.optionxform = str
+    try:
+        cfg.read(path, encoding="utf-8")
+    except (configparser.Error, UnicodeDecodeError):
+        return {}
+    out = {}
+    for sec in cfg.sections():
+        m = re.fullmatch(r"Containments\]\[(\d+)", sec)
+        if not m or "wallpaperplugin" not in cfg[sec]:
+            continue
+        cid, plugin = m.group(1), cfg[sec]["wallpaperplugin"]
+        general = f"Containments][{cid}][Wallpaper][{plugin}][General"
+        opts = cfg[general] if cfg.has_section(general) else {}
+        interval = None
+        if plugin == "org.kde.slideshow":
+            try:
+                interval = int(opts.get("SlideInterval", 900))      # Plasma's default: 15 min
+            except ValueError:
+                interval = 900
+        out[cid] = (plugin, opts.get("Image", ""), interval)
+    return out
+
+
+def next_slide_change(walls, now):
+    """When the next slideshow picture comes up (epoch seconds), or None. Plasma
+    turns slideshows over on the clock: at whole multiples of the interval
+    since 1970, the same moment on every screen."""
+    times = [(now // iv + 1) * iv for _, _, iv in walls.values() if iv]
+    return float(min(times)) if times else None
+
+
+def wallpapers_differ(before, after):
+    """A new picture or wallpaper type on some desktop (not icons moving about)."""
+    return {k: v[:2] for k, v in before.items()} != {k: v[:2] for k, v in after.items()}
 
 
 def wall_clock():
@@ -457,6 +508,9 @@ def pose_rows(idle, kind):
         for ex, ey in EYES:
             for dy in (0, 1, 2):
                 g[ey + dy][ex] = g[ey + dy][ex + 1] = ink
+    elif kind == "back":
+        # turned round: from behind he's his silhouette, no eyes
+        clear_eyes()
     elif kind == "sad":
         # eyes slanting down at the outer corners, a little lower
         clear_eyes()
@@ -665,7 +719,7 @@ class Sprites:
         idle = [r[hx:hx + self.iw] for r in jump["frames"][0]["rows"][hy:hy + self.ih]]
         self.poses = {k: grid_image(pose_rows(idle, k), palette)
                       for k in ("idle", "blink", "look_l", "look_r", "happy",
-                                "read", "read_l", "read_r", "surprised", "sad")}
+                                "read", "read_l", "read_r", "surprised", "sad", "back")}
         left = climb_rows(idle)
         right = ["".join(reversed(r)) for r in left]
         self.anims["climb"] = Anim("climb", {
@@ -752,6 +806,13 @@ class Sprites:
         lean = dg_frames[LEAN_2]
         cells = [x for r in lean for x, c in enumerate(r) if c != "."]
         self.dangle_lean = 1 if sum(cells) / max(1, len(cells)) >= grip[0] + 1 else -1
+        # Climbing up a window's side, the edge along his right (mirrored for the other side)
+        if "climb_side" in extras:
+            cs = extras["climb_side"]
+            self.anims["climb_side"] = Anim("climb_side", {
+                "size": [len(cs["frames"][0][0]), len(cs["frames"][0])], "home": cs["home"],
+                "frames": [{"ms": 140, "rows": rows} for rows in cs["frames"]]},
+                {k: rgb(v) for k, v in cs["palette"].items()})
         # nightcap_stretch: the nightcap with its tail flipped up, out of the left arm's way
         self.hats = {n: (images(n), tuple(extras[n]["anchor"])) for n in list(HATS) + ["nightcap_stretch"]}
         self.hats_flipped = {n: [flipped(img) for img in frames] for n, (frames, _) in self.hats.items()}
@@ -1472,6 +1533,7 @@ class ClawdPet(QWidget):
         self._grab_cool = 0.0
         self._sure_armed = True                # a pointer held right above him gets grabbed
         self._morning = None                   # the day he last had his morning coffee
+        self._startled_at = -1e9               # when the wallpaper last gave him a fright
         self._new_year = None                  # the year he last saw in
         self._input_at = 0.0                   # when you last moved the pointer or sent a prompt
         self._streak_at = 0.0                  # since when you've been at it without a break
@@ -1910,7 +1972,7 @@ class ClawdPet(QWidget):
                     weights[k] *= 0.3
             weights["sleep"] = max(weights.get("sleep", 0), 6 if lively else 20)
             weights["yawn"] = 10
-        weights = {k: v for k, v in weights.items() if v > 0 and (k not in off or k == "hop_down")}
+        weights = {k: v for k, v in weights.items() if v > 0 and (k not in off or k in ("hop_down", "climb_down"))}
         if not weights:
             return "idle"
         return random.choices(list(weights), weights=list(weights.values()))[0]
@@ -1920,9 +1982,13 @@ class ClawdPet(QWidget):
         if self._window_under() is not None:       # up on a window: things that fit up there
             weights = {k: v for k, v in weights.items() if k in ON_A_WINDOW}
             weights["hop_down"] = 12
+            if self._climb_down_target() is not None:
+                weights["climb_down"] = 10
             return weights
         if self._window_target() is not None:
             weights["perch_window"] = 10
+        if self._climb_target() is not None:
+            weights["climb_window"] = 8
         if drowsy:
             weights["sleep"] = 25                 # nothing's happened for a while: nap time
         if self._lurk_side() is None:
@@ -2421,12 +2487,17 @@ class ClawdPet(QWidget):
 
     # ── Hats ──────────────────────────────────────────────────────
 
+    def _minute(self):
+        t = self.wall()
+        return t.hour * 60 + t.minute
+
     def is_night(self):
-        h = self.wall().hour
-        return h >= 22 or h < 6
+        m, start, end = self._minute(), self.prefs["night_from"], self.prefs["night_to"]
+        return (m >= start or m < end) if start > end else start <= m < end
 
     def is_morning(self):
-        return 6 <= self.wall().hour < 11
+        m, start, end = self._minute(), self.prefs["night_to"], self.prefs["morning_to"]
+        return (m >= start or m < end) if start > end else start <= m < end
 
     def hat(self):
         """The hat he's wearing right now, or None."""
@@ -3152,6 +3223,73 @@ class ClawdPet(QWidget):
         yield from self._walk_to(geo.left() + back if side < 0 else right_edge - width - back)
         self.offscreen = False
 
+    # ── The wallpaper ─────────────────────────────────────────────
+
+    def watch_wallpaper(self, path=PLASMA_DESKTOP_RC):
+        """Be ready for the wallpaper changing: slideshows on the clock, and
+        Plasma's config for a picture you set yourself."""
+        self._wall_path = path
+        self._walls = plasma_wallpapers(path)
+        self._wall_timer = QTimer(self)
+        self._wall_timer.setSingleShot(True)
+        self._wall_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._wall_timer.timeout.connect(self._slide_turned)
+        self._wall_watch = QFileSystemWatcher(self)
+        if os.path.exists(path):
+            self._wall_watch.addPath(path)
+        self._wall_watch.fileChanged.connect(lambda _p: QTimer.singleShot(500, self._wall_config_changed))
+        self._schedule_slide()
+
+    def _schedule_slide(self):
+        at = next_slide_change(self._walls, time.time())
+        if at is not None:
+            self._wall_timer.start(int((at - time.time()) * 1000) + 300)   # just as the new one fades in
+
+    def _slide_turned(self):
+        self.wallpaper_changed()
+        self._schedule_slide()
+
+    def _wall_config_changed(self):
+        if self._wall_path not in self._wall_watch.files() and os.path.exists(self._wall_path):
+            self._wall_watch.addPath(self._wall_path)        # it's saved by replacing the file
+        walls = plasma_wallpapers(self._wall_path)
+        changed = wallpapers_differ(self._walls, walls)
+        self._walls = walls
+        self._schedule_slide()
+        if changed:
+            self.wallpaper_changed()
+
+    def wallpaper_changed(self):
+        """A new wallpaper behind him: he spins round to look, and jumps out of his skin."""
+        if (self.manual or self.dragging or self.airborne or self._dangling or self.ducked
+                or self.action in ("startled", "attention", "settings", "held", "fall", "duck", "grab")
+                or self.action in REMINDERS or self.action == "work"
+                or self.now - self._startled_at < 60_000):
+            return
+        self._startled_at = self.now
+        self.start("startled")
+
+    def _act_startled(self):
+        look = random.choice(("look_l", "look_r"))
+        self.pose(look)                                     # huh? something changed
+        yield 260
+        self.pose("idle")
+        yield 140
+        self.pose("back")                                   # turns round to look
+        yield 800
+        self.pose("surprised")                              # whoa!
+        self._emit("excl", 11, -8, vy=-2, life=900)
+        yield 120
+        yield from self._once("jump")
+        for k in (-1, 1):
+            self._emit("drop", 2 if k < 0 else 19, 0.0, vx=5 * k, vy=-7, g=40, life=900)
+        self.pose("back")                                   # another look
+        yield 700
+        self.pose("happy")                                  # ...nice, actually
+        yield 900
+        self.pose("idle")
+        yield 300
+
     # ── His settings, open ────────────────────────────────────────
 
     def _toward_settings(self):
@@ -3753,6 +3891,180 @@ class ClawdPet(QWidget):
         self.show_frame("jump", 2)
         yield from self._arc_to(box_left, top, 6 * s)
         yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
+
+    def _window(self, wid):
+        return next((w for w in self.window_list if w["id"] == wid), None)
+
+    def _column_clear(self, win, box, y0, y1):
+        """Is the column beside a window's side (his box, from y0 down to y1)
+        clear of windows stacked above it, and on a screen?"""
+        wpx = self.iw * self.scale
+        if area_at(box + 1, (y0 + y1) / 2) is None or area_at(box + wpx - 1, (y0 + y1) / 2) is None:
+            return False
+        for w in self.window_list:
+            if w["stack"] > win["stack"] and not w["fs"]:
+                if w["x"] < box + wpx and w["x"] + w["w"] > box and w["y"] < y1 and w["y"] + w["h"] > y0:
+                    return False
+        return True
+
+    def _climb_target(self):
+        """A window he can climb up the side of from where he stands: its side
+        comes down to near his feet, it's in view, and there's room to stand
+        up top at that end. (window id, side: -1 its left edge, box left)."""
+        s, wpx = self.scale, self.iw * self.scale
+        feet = self._feet()
+        left, right = self.box_span()
+        room_l, room_r = self._room()
+        lo, hi = left - room_l, right + room_r
+        tops = [sf for sf in self._surfaces() if sf[3] is not None]
+        best = None
+        for win in self.window_list:
+            top, bottom = win["y"], win["y"] + win["h"]
+            if (win["fs"] or win["id"] == self.standing_on or top > feet - 2 * self.ih * s
+                    or bottom < feet - CLIMB_JUMP * s):
+                continue
+            for side in (-1, 1):
+                edge = win["x"] if side < 0 else win["x"] + win["w"]
+                box = edge - wpx if side < 0 else edge
+                if box < lo or box + wpx > hi:
+                    continue                                    # can't walk there from here
+                if not any(sf[0] == top and sf[3] == win["id"] and (sf[1] == edge if side < 0 else sf[2] == edge)
+                           and sf[2] - sf[1] >= wpx for sf in tops):
+                    continue                                    # nowhere to stand at the top
+                if not self._column_clear(win, box, top, min(feet, bottom)):
+                    continue
+                cost = abs(box - left)
+                if best is None or cost < best[0]:
+                    best = (cost, win["id"], side, box)
+        return best[1:] if best else None
+
+    def _climb_down_target(self):
+        """From the window he's on: a side he can climb down (side, box left
+        to climb at), or None."""
+        on = self._window_under()
+        if on is None:
+            return None
+        top, x0, x1, wid = on
+        win = self._window(wid)
+        if win is None:
+            return None
+        wpx = self.iw * self.scale
+        left = self.box_span()[0]
+        best = None
+        for side, end, box in ((-1, x0, x0 - wpx), (1, x1, x1)):
+            if end != (win["x"] if side < 0 else win["x"] + win["w"]):
+                continue                                        # the span ends at a window in front, not the edge
+            floor = self._floor_below(box)
+            if floor is None or not self._column_clear(win, box, top, floor):
+                continue
+            cost = abs((x0 if side < 0 else x1 - wpx) - left)
+            if best is None or cost < best[0]:
+                best = (cost, side, box)
+        return best[1:] if best else None
+
+    def _floor_below(self, box):
+        """The first surface below the window top he's on, beside it at `box`."""
+        cx, feet = box + self.iw * self.scale / 2, self._feet()
+        ys = [y for y, x0, x1, _ in self._surfaces() if x0 <= cx < x1 and y > feet + 2]
+        return min(ys) if ys else None
+
+    def _act_climb_window(self):
+        """Walk to the side of a window and climb it, hand over hand up its
+        edge, then pull himself up onto the top."""
+        target = self._climb_target()
+        if target is None:
+            return
+        wid, side, box = target
+        yield from self._walk_to(box)
+        self.set_box_left(box)
+        self.pose("look_r" if side < 0 else "look_l")      # sizing it up
+        yield 450
+        win = self._window(wid)
+        if win is None:
+            return
+        s = self.scale
+        self.scripted = True
+        bottom = win["y"] + win["h"]
+        if bottom < self._feet():                           # the side starts above him: jump for it
+            self.show_frame("jump", 1)
+            yield 140
+            self.show_frame("jump", 2)
+            rise = self._feet() - bottom + self.ih * s / 2
+            for k in range(1, 9):
+                self.y -= rise / 8
+                yield TICK_MS
+        done = yield from self._climb_side(wid, side, up=True)
+        if not done:
+            return
+        win = self._window(wid)
+        edge = win["x"] if side < 0 else win["x"] + win["w"]
+        inward = edge + 2 * s if side < 0 else edge - self.iw * s - 2 * s
+        self.show_frame("jump", 2)                          # and over the top
+        yield from self._arc_to(inward, win["y"], 3 * s)
+        yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
+        self.pose("happy")
+        yield 500
+
+    def _act_climb_down(self):
+        """Down the side of the window he's on: along to its end, over the edge,
+        and hand over hand down its side, dropping off the bottom if it stops
+        short of the floor."""
+        target = self._climb_down_target()
+        if target is None:
+            return
+        side, box = target
+        wid = self.standing_on or self._window_under()[3]
+        wpx = self.iw * self.scale
+        yield from self._walk_to(box + wpx if side < 0 else box - wpx)
+        self.pose("look_l" if side < 0 else "look_r")      # peering over the edge
+        yield 500
+        self.scripted = True
+        self.set_box_left(box)                              # over the edge, holding on
+        yield from self._climb_side(wid, side, up=False, goal=self._floor_below(box))
+
+    def _climb_side(self, wid, side, up, goal=None):
+        """Hand over hand up (or down) beside a window's side, moving with the
+        window if it's moved. Down, stops at `goal` (feet) or the bottom of the
+        side, then lets go. If the window goes, he falls. True if he made it."""
+        s = self.scale
+        win = self._window(wid)
+        last = (win["x"], win["y"]) if win else None
+        k = 0
+        while True:
+            win = self._window(wid)
+            if win is None:                                 # gone: nothing to hold on to
+                self.scripted = False
+                self.airborne = True
+                yield from self._fall()
+                return False
+            if (win["x"], win["y"]) != last:                # moved: along with it
+                self.x += win["x"] - last[0]
+                self.y += win["y"] - last[1]
+                last = (win["x"], win["y"])
+            feet = self._feet()
+            if up and feet <= win["y"]:
+                return True
+            if not up and (feet >= (goal if goal is not None else feet)
+                           or feet - self.ih * s / 2 >= win["y"] + win["h"]):
+                self.scripted = False                       # down (or off the bottom: drop the rest)
+                if self.y < self.ground_y() - 1:
+                    self.airborne = True
+                    yield from self._fall()
+                else:
+                    self.y = self.ground_y()
+                    self.pose("idle")
+                return True
+            if k % 8 == 0:                                  # the edge beside him (or the ladder frames)
+                if "climb_side" in self.sp.anims:
+                    self.show_frame("climb_side", (k // 8) % 2, side > 0)
+                else:
+                    self.show_frame("climb", (k // 8) % 2)
+            k += 1
+            step = CLIMB_SPEED * WINDOW_CLIMB * s * TICK_MS / 1000
+            self.y += -step if up else step
+            if not up and goal is not None:
+                self.y = min(self.y, goal - self.home_px.y() - self.ih * s)
+            yield TICK_MS
 
     def _act_hop_down(self):
         """Hop off the window he's on, off whichever end is nearer."""
@@ -4453,6 +4765,19 @@ class SettingsDialog(QDialog):
         lay.addWidget(self._check("day_cycle", "Time of day: yawns and naps at night, coffee in the morning"))
         lay.addWidget(self._check("seasons", "Holidays: Santa hat in December, pumpkin at Halloween, "
                                              "party hat at New Year"))
+        self.times = {}
+        row = QHBoxLayout()
+        for key, before in (("night_from", "Night from"), ("night_to", "to"), ("morning_to", "; mornings until")):
+            row.addWidget(QLabel(before))
+            edit = QTimeEdit()
+            edit.setDisplayFormat("HH:mm")
+            minutes = pet.prefs[key]
+            edit.setTime(QTime(minutes // 60, minutes % 60))
+            edit.timeChanged.connect(lambda t, k=key: pet.set_pref(k, t.hour() * 60 + t.minute()))
+            row.addWidget(edit)
+            self.times[key] = edit
+        row.addStretch(1)
+        lay.addLayout(row)
         row = QHBoxLayout()
         row.addWidget(QLabel("Hat"))
         self.hat = QComboBox()
@@ -4569,6 +4894,8 @@ def main():
         catcher = DropCatcher(pet)               # KWin won't hand drags to him directly
         if catcher.typed:
             pet.catcher = catcher
+    if os.path.exists(PLASMA_DESKTOP_RC):
+        pet.watch_wallpaper()
 
     if QSystemTrayIcon.isSystemTrayAvailable():
         tray = QSystemTrayIcon(tray_icon(sprites), app)

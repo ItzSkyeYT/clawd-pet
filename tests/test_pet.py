@@ -460,6 +460,109 @@ class OnWindows(unittest.TestCase):
         self.assertIn('"Windows"', js)
 
 
+class ClimbingWindows(unittest.TestCase):
+    """A window reaching down past the laptop screen's floor (1530): [x, y, w, h, stack, fs, active, output, id]."""
+    WIN = [600, 1000, 500, 600, 3, 0, 1, "eDP-1", "w"]
+
+    def setUp(self):
+        random.seed(22)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def stand_on(self, box_left, feet):
+        self.pet.set_box_left(box_left)
+        self.pet.y = feet - self.pet.home_px.y() - self.pet.ih * self.pet.scale
+        self.pet.start("idle")
+        self.pet.advance(16)
+
+    def feet(self):
+        return self.pet._feet()
+
+    def climb(self, action="climb_window", ms=40_000):
+        seen, boxes = set(), []
+        self.pet.play(action)
+        for _ in range(int(ms / 16)):
+            self.pet.advance(16)
+            seen.add(self.pet.frame[1])
+            if self.pet.frame[1] in ("climb", "climb_side"):
+                boxes.append(self.pet.box_span())
+            if self.pet.action != action and not self.pet.airborne:
+                break
+        return seen, boxes
+
+    def test_he_climbs_up_the_side_and_stands_on_top(self):
+        self.pet.windows_changed([self.WIN])
+        self.stand_on(250, 1530)
+        seen, boxes = self.climb()
+        self.assertTrue(seen & {"climb", "climb_side"})
+        self.assertAlmostEqual(self.feet(), 1000, delta=1)
+        self.assertEqual(self.pet.standing_on, "w")
+        left, right = self.pet.box_span()
+        self.assertTrue(600 <= left and right <= 1100, (left, right))
+        self.assertTrue(all(r <= 601 for _, r in boxes))            # hugging the left edge, outside
+
+    def test_he_climbs_down_the_side_too(self):
+        self.pet.windows_changed([self.WIN])
+        self.stand_on(650, 1000)
+        seen, boxes = self.climb("climb_down")
+        self.assertTrue(seen & {"climb", "climb_side"})
+        self.assertAlmostEqual(self.feet(), 1530, delta=1)
+        self.assertTrue(boxes and all(r <= 601 for _, r in boxes))
+
+    def test_the_window_moving_takes_him_along_mid_climb(self):
+        self.pet.windows_changed([self.WIN])
+        self.stand_on(250, 1530)
+        self.pet.play("climb_window")
+        self.assertTrue(run_ms(self.pet, 20_000, until=lambda: self.pet.frame[1] in ("climb", "climb_side")))
+        run_ms(self.pet, 500)
+        left, y = self.pet.box_span()[0], self.pet.y
+        moved = list(self.WIN)
+        moved[0], moved[1] = 680, 960
+        self.pet.windows_changed([moved])
+        run_ms(self.pet, 32)
+        self.assertAlmostEqual(self.pet.box_span()[0], left + 80, delta=1)
+        self.assertLess(self.pet.y, y - 30)
+
+    def test_the_window_going_away_mid_climb_drops_him(self):
+        self.pet.windows_changed([self.WIN])
+        self.stand_on(250, 1530)
+        self.pet.play("climb_window")
+        self.assertTrue(run_ms(self.pet, 20_000, until=lambda: self.pet.frame[1] in ("climb", "climb_side")))
+        run_ms(self.pet, 1500)
+        self.pet.windows_changed([])
+        self.assertTrue(run_ms(self.pet, 8000, until=lambda: not self.pet.airborne and self.feet() > 1520))
+        self.assertAlmostEqual(self.feet(), 1530, delta=1)
+
+    def test_not_up_an_edge_hidden_behind_another_window(self):
+        cover = [450, 900, 300, 700, 5, 0, 0, "eDP-1", "c"]             # over the left edge
+        self.pet.windows_changed([self.WIN, cover])
+        self.stand_on(1300, 1530)
+        target = self.pet._climb_target()
+        self.assertIsNotNone(target)
+        self.assertEqual(target[1], 1)                                  # the right side instead
+
+    def test_a_side_just_out_of_reach_is_jumped_to_but_not_one_far_up(self):
+        low = [600, 1000, 500, 1530 - 1000 - 10 * self.pet.scale, 3, 0, 1, "eDP-1", "w"]
+        self.pet.windows_changed([low])
+        self.stand_on(250, 1530)
+        self.assertIsNotNone(self.pet._climb_target())
+        seen, _ = self.climb()
+        self.assertAlmostEqual(self.feet(), 1000, delta=1)
+        high = [600, 1000, 500, 300, 3, 0, 1, "eDP-1", "w"]            # its side ends 230 px up
+        self.pet.windows_changed([high])
+        self.stand_on(250, 1530)
+        self.assertIsNone(self.pet._climb_target())
+
+    def test_he_does_it_on_his_own_too(self):
+        self.pet.windows_changed([self.WIN])
+        self.stand_on(250, 1530)
+        self.pet.prefs["scenes_off"] = [k for k in cp.WEIGHTS] + ["perch_window"]   # nothing else to do
+        self.assertEqual(self.pet._pick_action(), "climb_window")
+
+
 class ClaudeHooks(unittest.TestCase):
     def setUp(self):
         random.seed(5)
@@ -2311,6 +2414,134 @@ class Performance(unittest.TestCase):
         js = cp.kwin_desktop_script()
         self.assertIn("NEAR", js)
         self.assertIn("FAR_STEP", js)
+
+
+PLASMA_RC = """[Containments][44]
+activityId=2e4d
+plugin=org.kde.plasma.folder
+wallpaperplugin=org.kde.slideshow
+
+[Containments][44][General]
+positions={"1920x1200":["4","17"]}
+
+[Containments][44][Wallpaper][org.kde.slideshow][General]
+Image=file:///home/me/Pictures/a.jpg
+SlidePaths=/home/me/Pictures/
+
+[Containments][45]
+plugin=org.kde.desktopcontainment
+wallpaperplugin=org.kde.image
+
+[Containments][45][Wallpaper][org.kde.image][General]
+Image=/home/me/b.jpg
+"""
+
+
+class Wallpaper(unittest.TestCase):
+    def setUp(self):
+        random.seed(13)
+        self.dir = tempfile.mkdtemp()
+        self.rc = os.path.join(self.dir, "plasma-org.kde.plasma.desktop-appletsrc")
+        with open(self.rc, "w") as f:
+            f.write(PLASMA_RC)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.pet.start("idle")
+        run_ms(self.pet, 100)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def test_what_plasma_has_on_the_desktops(self):
+        walls = cp.plasma_wallpapers(self.rc)
+        self.assertEqual(walls["44"], ("org.kde.slideshow", "file:///home/me/Pictures/a.jpg", 900))
+        self.assertEqual(walls["45"], ("org.kde.image", "/home/me/b.jpg", None))
+
+    def test_slideshows_change_on_the_clock(self):
+        walls = cp.plasma_wallpapers(self.rc)
+        self.assertEqual(cp.next_slide_change(walls, 1_000_000.0), 1_000_800.0)   # the next multiple of 900
+        with open(self.rc, "a") as f:
+            f.write("SlideInterval=600\n")          # lands in 45's image group: not a slideshow
+        self.assertEqual(cp.next_slide_change(cp.plasma_wallpapers(self.rc), 1_000_000.0), 1_000_800.0)
+        self.assertIsNone(cp.next_slide_change({"45": ("org.kde.image", "x", None)}, 1_000_000.0))
+
+    def test_only_a_new_wallpaper_counts_as_a_change(self):
+        before = cp.plasma_wallpapers(self.rc)
+        with open(self.rc, "w") as f:
+            f.write(PLASMA_RC.replace('["4","17"]', '["5","17"]'))          # icons moved: no
+        self.assertFalse(cp.wallpapers_differ(before, cp.plasma_wallpapers(self.rc)))
+        with open(self.rc, "w") as f:
+            f.write(PLASMA_RC.replace("b.jpg", "c.jpg"))                     # a new picture: yes
+        self.assertTrue(cp.wallpapers_differ(before, cp.plasma_wallpapers(self.rc)))
+
+    def test_it_makes_him_jump(self):
+        self.pet.wallpaper_changed()
+        self.assertEqual(self.pet.action, "startled")
+        seen = set()
+        run_ms(self.pet, 6000, until=lambda: seen.add(self.pet.frame[1]) or self.pet.action != "startled")
+        self.assertIn("back", seen)                   # he turned round to look...
+        self.assertIn("surprised", seen)              # ...and got a fright
+        self.assertIn("jump", seen)
+
+    def test_it_wakes_him_from_a_nap_but_not_mid_something_you_asked_for(self):
+        self.pet.start("sleep")
+        run_ms(self.pet, 500)
+        self.pet.wallpaper_changed()
+        self.assertEqual(self.pet.action, "startled")
+        self.pet.play("dance")
+        self.pet.wallpaper_changed()
+        self.assertEqual(self.pet.action, "dance")
+
+
+class DayTimes(unittest.TestCase):
+    def setUp(self):
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def test_the_default_night_and_morning(self):
+        for (h, m), night, morning in (((21, 59), False, False), ((22, 0), True, False), ((3, 0), True, False),
+                                       ((6, 0), False, True), ((10, 59), False, True), ((11, 0), False, False)):
+            self.pet.wall = at(h, m)
+            self.assertEqual((self.pet.is_night(), self.pet.is_morning()), (night, morning), (h, m))
+
+    def test_you_choose_when_night_and_morning_are(self):
+        self.pet.prefs["night_from"], self.pet.prefs["night_to"] = 23 * 60 + 30, 7 * 60
+        self.pet.prefs["morning_to"] = 9 * 60
+        self.pet.wall = at(23, 0)
+        self.assertFalse(self.pet.is_night())
+        self.pet.wall = at(23, 45)
+        self.assertTrue(self.pet.is_night())
+        self.pet.wall = at(6, 30)
+        self.assertTrue(self.pet.is_night())
+        self.pet.wall = at(8, 30)
+        self.assertTrue(self.pet.is_morning())
+        self.pet.wall = at(9, 30)
+        self.assertFalse(self.pet.is_morning())
+
+    def test_a_night_that_does_not_cross_midnight(self):
+        self.pet.prefs["night_from"], self.pet.prefs["night_to"] = 60, 5 * 60      # 01:00-05:00
+        self.pet.wall = at(0, 30)
+        self.assertFalse(self.pet.is_night())
+        self.pet.wall = at(2, 0)
+        self.assertTrue(self.pet.is_night())
+
+    def test_the_dialog_sets_them(self):
+        from PyQt6.QtCore import QTime
+        real = cp.hooks_installed
+        cp.hooks_installed = lambda path=None: (13, 13)
+        try:
+            d = cp.SettingsDialog(self.pet)
+            d.times["night_from"].setTime(QTime(21, 15))
+            self.assertEqual(self.pet.prefs["night_from"], 21 * 60 + 15)
+            d.times["morning_to"].setTime(QTime(12, 0))
+            self.assertEqual(self.pet.prefs["morning_to"], 12 * 60)
+            d.close()
+            d.deleteLater()
+        finally:
+            cp.hooks_installed = real
 
 
 class Launcher(unittest.TestCase):

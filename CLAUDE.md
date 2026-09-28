@@ -85,10 +85,16 @@ to what Claude Code is doing.
   folders open), rummages (paper scraps fly up out of it),
   pulls out a page, puts on reading glasses and reads it like a story, reacting as he
   goes (surprised, teary, laughing, in love, scared, confused), then puts it all back
-- He walks on windows: hops up onto a window's top edge, rides it when you move the
-  window, hops down again; ducks out of sight while something is fullscreen on his screen
+- He walks on windows: hops up onto a window's top edge or climbs its side hand over hand
+  and pulls himself up, rides it when you move the window (even mid-climb), hops or climbs
+  down again; ducks out of sight while something is fullscreen on his screen
+- **A new wallpaper** makes him jump: he glances about, turns round to look (from behind
+  he has no eyes), whips back with a "!" and jumps. Plasma slideshows change on the clock
+  (whole multiples of the interval, 15 min by default), so he's ready for each one; a
+  wallpaper you set yourself is caught from Plasma's config
 - **Time and seasons** (from the clock): sleepier at night (yawns, longer naps in a
-  nightcap), a stretch and a mug of coffee on the first morning visit, a Santa hat in
+  nightcap), a stretch and a mug of coffee on the first morning visit (night 22:00-06:00
+  and mornings until 11:00 by default; both are set in Settings), a Santa hat in
   December, a party hat with confetti at New Year (and a dance at midnight), a pumpkin
   with bats in the week before Halloween
 - **Reminders**: water every 45 min (he runs over to you, hops up and down waving a bottle,
