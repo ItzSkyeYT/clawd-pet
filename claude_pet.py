@@ -453,37 +453,6 @@ def typing_eyes(rows, kind, body, ink):
     return ["".join(r) for r in g]
 
 
-def squeezed_eyes(rows, body, ink):
-    """Eyes squeezed shut, > <, for a big stretch or a yawn."""
-    g = [list(r) for r in rows]
-    mid = len(g[0]) / 2
-    cells = [(x, y) for y, r in enumerate(g) for x, c in enumerate(r) if c == ink]
-    for left in (True, False):
-        eye = [(x, y) for x, y in cells if (x < mid) == left]
-        if not eye:
-            continue
-        x0, x1 = min(x for x, _ in eye), max(x for x, _ in eye)
-        y0 = min(y for _, y in eye)
-        for x, y in eye:
-            g[y][x] = body
-        tip = (x0 + 1, x1 - 1)[not left]
-        edge = (x0, x1)[not left]
-        for x, y in ((edge, y0), (tip, y0 + 1), (edge, y0 + 2)):
-            g[y][x] = ink
-    return ["".join(r) for r in g]
-
-
-def reach_rows(rows, body, n=1):
-    """Arms up, reaching n cells higher: the top row of his raised arms, repeated."""
-    g = [list(r) for r in rows]
-    top = next(y for y, r in enumerate(g) if body in r)
-    for k in range(1, n + 1):
-        for x, c in enumerate(g[top]):
-            if c == body:
-                g[top - k][x] = body
-    return ["".join(r) for r in g]
-
-
 def poke_rows(idle):
     """Poking with the right arm stretched out: 3 px further, a pixel thinner."""
     body = idle[0][4]
@@ -568,17 +537,11 @@ class Sprites:
                 "size": laptop["size"], "home": laptop["home"], "loop": [0, len(typing) - 1],
                 "frames": [{"ms": f["ms"], "rows": typing_eyes(f["rows"], kind, body, ink)} for f in typing]},
                 palette)
-        # Clawd-Jumping's arms-up frame brought down to the floor: cheering
-        # (its own wide eyes) and stretching (eyes squeezed shut)
+        # Clawd-Jumping's arms-up frame brought down to the floor, for cheering
         up = jump["frames"][2]["rows"]
         drop = hy + self.ih - 1 - max(y for y, r in enumerate(up) if r.strip("."))
-        grounded = ["." * len(up[0])] * drop + up[:len(up) - drop]
-        squeezed = squeezed_eyes(grounded, body, ink)
-        # A stretch reaches higher than a cheer: well clear of a hat's brim
-        stretch = [reach_rows(squeezed, body, 2), reach_rows(squeezed, body, 3)]
-        for name, frames in (("cheer", [grounded]), ("stretch", stretch)):
-            self.anims[name] = Anim(name, {"size": jump["size"], "home": jump["home"],
-                                           "frames": [{"ms": 300, "rows": r} for r in frames]}, palette)
+        self.anims["cheer"] = Anim("cheer", {"size": jump["size"], "home": jump["home"], "frames": [
+            {"ms": 300, "rows": ["." * len(up[0])] * drop + up[:len(up) - drop]}]}, palette)
         self.anims["poke"] = Anim("poke", {
             "size": [self.iw + 3, self.ih], "home": [0, 0],
             "frames": [{"ms": 180, "rows": poke_rows(idle)}]}, palette)
@@ -596,7 +559,17 @@ class Sprites:
             e = extras[name]
             pal = {k: rgb(v) for k, v in e["palette"].items()}
             return [grid_image(rows, pal) for rows in e["frames"]]
-        self.hats = {n: (images(n), tuple(extras[n]["anchor"])) for n in HATS}
+        # The stretch: arms up in a V, clear of any hat, on tiptoe, eyes > <.
+        # Its head is given (the arms reach the frame's edges, which would
+        # read as a head peeking in).
+        st = extras["stretch"]
+        st_pal = {k: rgb(v) for k, v in st["palette"].items()}
+        self.anims["stretch"] = Anim("stretch", {
+            "size": [len(st["frames"][0][0]), len(st["frames"][0])], "home": st["home"],
+            "frames": [{"ms": 300, "rows": rows} for rows in st["frames"]]}, st_pal)
+        self.anims["stretch"].heads = [tuple(st["head"])] * len(st["frames"])
+        # nightcap_stretch: the nightcap with its tail flipped up, out of the left arm's way
+        self.hats = {n: (images(n), tuple(extras[n]["anchor"])) for n in list(HATS) + ["nightcap_stretch"]}
         self.hats_flipped = {n: [flipped(img) for img in frames] for n, (frames, _) in self.hats.items()}
         for name in ("mug", "water_bottle", "break_bubble", "water_bubble"):
             self.props[name] = images(name)[0]
@@ -2151,6 +2124,8 @@ class ClawdPet(QWidget):
         name = self.hat()
         if name is None:
             return None
+        if name == "nightcap" and self.frame[:2] == ("anim", "stretch"):
+            name = "nightcap_stretch"
         n = len(self.sp.hats[name][0])
         if self.action == "sleep":
             k = int(self.now // 1400) % n

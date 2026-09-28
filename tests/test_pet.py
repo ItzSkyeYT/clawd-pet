@@ -1298,6 +1298,14 @@ class TimeAndSeasons(unittest.TestCase):
         self.pet.wall = at(14)
         self.assertIsNone(self.pet.hat())
 
+    def test_his_nightcap_flips_its_tail_up_when_he_stretches(self):
+        self.pet.wall = at(23, 30)
+        self.pet.start("sleep")                   # at night: a big stretch first
+        self.assertTrue(run_ms(self.pet, 1000, until=lambda: self.pet.frame[:2] == ("anim", "stretch")))
+        self.assertEqual(self.pet._hat_key()[0], "nightcap_stretch")
+        self.assertTrue(run_ms(self.pet, 3000, until=lambda: self.pet.frame[0] == "pose"))
+        self.assertEqual(self.pet._hat_key()[0], "nightcap")
+
     def test_the_hat_sits_on_his_head_in_every_frame(self):
         self.pet.prefs["hat"] = "santa_hat"
         frames, (ax, ay) = self.pet.sp.hats["santa_hat"]
