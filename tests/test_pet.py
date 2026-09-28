@@ -1482,6 +1482,18 @@ class Reminders(unittest.TestCase):
         self.assertIn(5, lifts)
         self.assertTrue(bubble and droplets)
 
+    def test_he_runs_over_to_you_first(self):
+        geo = self.pet.screen_geometry()
+        self.pet.set_box_left(geo.left() + 100)
+        far = geo.left() + geo.width() - 200
+        self.pet.cursor_moved(far, geo.top() + 300)
+        self.water_due()
+        run_ms(self.pet, 1100)
+        self.assertEqual(self.pet.action, "remind_water")
+        self.assertTrue(run_ms(self.pet, 30_000, until=lambda: self.pet.frame[1] == "cheer"))
+        left, right = self.pet.box_span()
+        self.assertLess(abs((left + right) / 2 - far), 300)
+
     def test_a_click_says_seen_it_and_he_drinks(self):
         self.water_due()
         run_ms(self.pet, 1100)

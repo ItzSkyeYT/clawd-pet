@@ -2922,12 +2922,30 @@ class ClawdPet(QWidget):
         else:
             self._snooze[kind] = self.now + SNOOZE
 
+    def _go_to_you(self):
+        """Run over toward the pointer (as far as what he's standing on goes), if it's far off."""
+        c = self.cursor
+        if c is None or not self.prefs["pointer"]:
+            return
+        left, right = self.box_span()
+        room_l, room_r = self._room()
+        target = min(max(c[0] - (right - left) / 2, left - room_l + 20), right + room_r - (right - left) - 20)
+        if abs(target - left) > 250:
+            yield from self._walk_to(target)
+            self.pose("idle")
+
     def _act_remind_water(self, preview=False):
-        """Water time, as loud as he gets: hops up and down waving a bottle, then
-        holds it out with a water bubble, looking at you, until you click him."""
+        """Water time, as loud as he gets: runs over to you, hops up and down
+        waving a bottle, then holds it out with a water bubble, looking at you,
+        until you click him. If you move off, he follows."""
         yield from self._come_back()
         end = self.now + (40_000 if preview else REMIND_FOR["water"])
+        self.layers = {"water_bottle": BOTTLE_SIDE}
+        n = 0
         while self.now < end:
+            if n % 3 == 0:
+                yield from self._go_to_you()
+            n += 1
             for _ in range(3):
                 yield from self._hop_with_bottle()
             self.layers = {"water_bottle": BOTTLE_SIDE}
@@ -2980,6 +2998,7 @@ class ClawdPet(QWidget):
     def _act_remind_break(self, preview=False):
         """Break time: the coffee bubble, a big stretch, a look and a wave, until you click him."""
         yield from self._come_back()
+        yield from self._go_to_you()
         end = self.now + (40_000 if preview else REMIND_FOR["break"])
         self._bubble(True, "break_bubble")
         while self.now < end:
