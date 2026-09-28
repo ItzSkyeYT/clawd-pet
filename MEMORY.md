@@ -24,6 +24,17 @@
   them; the default units (gridUnit 18, smallSpacing 4) are assumed
 - **Faces derived from the idle pose** (blink, look, happy), copying official shapes:
   the Clawd-Laptop wink for blinks, the Clawd-Dancing ^ ^ for happy
+- **A managed "drop catcher" under him** (Sept 2026): KWin 6.7's drag code only targets
+  managed windows, and he must stay unmanaged. A notification-typed twin avoids KWin's
+  work-area clamping (special windows skip `keepInArea`) and sits above normal windows.
+  Checked in KWin's source (input.cpp `pickDragTarget`, x11window.cpp `configureRequest`)
+  and live: it stays where it's put, low on the laptop screen
+- **Qt 6.11 overwrites `_NET_WM_STATE` on show**, so skip-taskbar can't be set before
+  mapping; the KWin script sets skipTaskbar/skipPager/skipSwitcher as the window appears
+- **Hats anchored per frame, not per animation**: head found from the pixels, so every
+  traced frame (and new ones) gets its hat without hand-placed offsets
+- **Extras are Python data parsed with `ast.literal_eval`**: hand-drawn art stays
+  diffable and commented, and loading it can't run code
 
 ## Where the official animations live
 - `https://claude.ai/images/clawd/core/Clawd-{CrabWalking,Waving,Lurking,Jumping,JumpingHappy}.gif`

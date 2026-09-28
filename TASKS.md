@@ -17,10 +17,18 @@
 - [x] Checks out desktop icons: puzzles, pokes, magnifying glass, verdict; stands on or hangs off them
 - [x] Reads a page from a desktop folder with glasses on, reacting to the story
 - [x] Start at login (XDG autostart, toggle in his menu) and "Restart Clawd"
+- [x] Walks on windows (hops up, rides them, hops down); ducks out of fullscreen
+- [x] Claude Code by tool: reading glasses, magnifying glass, cloud for the web, laptop
+- [x] Drop a folder on him: a Claude Code session there (works from Wayland apps too)
+- [x] Settings panel and quiet mode
+- [x] Hats (Santa, pumpkin, party, nightcap), night and morning routines, New Year
+      confetti, Halloween bats
+- [x] Water and break reminders, acknowledged with a click
 - [x] Tests (`python -m unittest discover -s tests -v`)
 
 ## Possible Improvements
-- [ ] Tool-specific flourishes (cloud for web searches, sparkler for subagents)
-- [ ] Auto-hide over fullscreen windows (he's unmanaged, so he floats above everything)
+- [ ] Sparkler or a small flourish for subagents
+- [ ] Keyboard activity for break reminders (KDE's GetSessionIdleTime is off on Wayland;
+      the ext-idle-notify protocol would need a native Wayland helper)
 - [ ] Trace the /btw video's poses (profile turn, thought bubble)
 - [ ] Windows installer

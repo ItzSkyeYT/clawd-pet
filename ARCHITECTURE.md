@@ -55,6 +55,10 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
   Anything you asked for (menu Play, a click, socket play, petting) finishes first
   (`start(..., manual=True)`), as do climbs, leaps, icon visits, reading and falls;
   `_next()` then goes straight to what Claude Code needs
+- What he does while busy follows the tool (`TOOL_STYLES` on PreToolUse): Read → glasses
+  and a page, Grep/Glob/LS → the magnifying glass, WebSearch/WebFetch → out on his cloud,
+  anything else → the laptop. A style is held for `STYLE_HOLD` so quick tool switches
+  don't make him flicker; a PostToolUseFailure makes him stumble
 
 ## Pointer
 - KDE Wayland: `start_kwin_cursor_feed()` registers `org.clawdpet.Pet` on D-Bus and
@@ -64,14 +68,64 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
 - While typing, `_typing_reaction()` swaps in Clawd-Laptop typing frames with other
   eyes (`typing_eyes()`: looking up left/right, happy) for GLANCE_MS, then cools down
 
+## Windows and fullscreen
+- The KWin script also reports windows (geometry, stacking, fullscreen, active, output,
+  id; never titles). `_surfaces()` = screen floors plus the visible parts of window top
+  edges with room above them (split where higher windows cover them), cached per tick
+- Landing is continuous: a fall stops on the first surface between where his feet were
+  and where they are. Standing on a window he rides it (`standing_on` + its geometry
+  delta); if it goes, he drops
+- Something fullscreen on his screen: `_act_duck` sinks him out of view, hides the
+  window, and pops him back up when it's over
+
+## Drag and drop
+- KWin hands drags from Wayland apps only to X11 windows it *manages*
+  (`pickDragTarget()` skips `!isClient()`), and Clawd is unmanaged. So on KDE Wayland a
+  `DropCatcher` sits under him: a managed window typed `_NET_WM_WINDOW_TYPE_NOTIFICATION`
+  (set with xprop before it maps: KWin never clamps special windows to the work area and
+  stacks notifications above normal windows), with his exact shape, position and
+  visibility (`_sync_catcher()` each tick). Being under him, it never sees the pointer,
+  only drags. The KWin script marks it skip-taskbar/pager/switcher and doesn't watch his
+  own windows' geometry (he moves every frame)
+- A drop is accepted as Copy (or Link), never Move, so the source never deletes anything
+
+## Settings
+- `Prefs` wraps QSettings (`prefs/<key>`) with typed defaults (`PREF_DEFAULTS`); an INI
+  file returns strings, and a one-item list as a bare string, so reads are coerced by
+  the default's type. `SettingsDialog` writes through `set_pref()`, which also reacts
+  (quiet mode wraps up a scene he's in)
+- Activity scales the rest between scenes (`ACTIVITY`); `scenes_off` filters
+  `_pick_action()`; quiet mode reduces it to idle or a nap
+
+## Hats, time of day, holidays
+- `head_of()` finds each frame's head when sprites load (`Anim.heads`); `_hat_image()`
+  places the hat's anchor there, mirrored with him, and `paint()` redraws whatever
+  reaches up past his head (raised arms) over the brim (`_reaching_up()`)
+- `hat()`: the menu/settings choice, else a nightcap for night naps, else
+  `season_hat(date)`. `wall_clock()` is the only clock read (tests pin it)
+- Night (22:00-06:00): sleepy rests, yawns, naps weighted up, lively scenes down.
+  Morning (06:00-11:00): `_act_morning` once a day, when you're there
+- `_confetti()` bursts when he wears the party hat; `_bats()` are particles that flap
+  (`flap` frames) and bob as they cross
+
+## Reminders
+- Activity: pointer movement (the KWin feed), prompts and clicks set `_input_at`; 10 min
+  with none (`AWAY`) counts as a break and restarts both counts. KDE refuses
+  `GetSessionIdleTime` on Wayland, so keyboard-only stretches aren't seen
+- `_maybe_remind()` (once a second) starts `remind_water` / `remind_break` when due, over
+  anything that isn't manual, physical or a permission request; `_react()` lets only a
+  permission request cut in. A click on him during one calls `acknowledge()` instead of
+  opening Claude Code. Ignored: snooze 10 min; after three goes the count restarts
+
 ## Props and icons
 - The ladder is a separate unmanaged, click-through window (`Prop`), placed on the
   lower screen by the seam and revealed from the top or bottom
 - Desktop icons come from Plasma's folder-view config (`positions=`), laid out with
   the same maths as Plasma's FolderView.qml (cell size, extra spacing, icon offset);
   entries that are directories get the reading scene
-- Layered frames: base frame (raised by `lift`), then `layers` (props), then `front`
-  (the cloud platform), then particles; the window mask covers all of them
+- Layered frames: base frame (raised by `lift`), then his hat (and his raised arms over
+  it), then `layers` (props), then `front` (the cloud platform), then particles; the
+  window mask covers all of them
 
 ## Platform notes
 - Unmanaged window (`X11BypassWindowManagerHint`): KWin keeps managed X11 windows
