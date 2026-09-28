@@ -61,6 +61,8 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
   loads a KWin script that calls it on `workspace.cursorPosChanged`. Elsewhere he
   polls `QCursor.pos()`. Hovering over him also counts
 - Petting: three or more direction changes over his body within 1.5 s
+- While typing, `_typing_reaction()` swaps in Clawd-Laptop typing frames with other
+  eyes (`typing_eyes()`: looking up left/right, happy) for GLANCE_MS, then cools down
 
 ## Props and icons
 - The ladder is a separate unmanaged, click-through window (`Prop`), placed on the

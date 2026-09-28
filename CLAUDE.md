@@ -28,11 +28,17 @@ to what Claude Code is doing.
 ## Controls
 - **Left-click**: the Code tab of the Claude app (`claude://code/continue?session=last`,
   or `claude://code/needs-input` while a session waits on you); a terminal if the app isn't there
-- **Right-click**: menu (Claude Code, new session, terminal, claude.ai, play any animation, size, quit)
+- **Right-click**: menu (Claude Code, new session, terminal, claude.ai, size, quit, and Play:
+  every move, the desktop scenes, and previews of the Claude Code states)
 - **Drag**: pick him up; let go and he falls (throw him and he bounces)
 - **Stroke him** with the pointer (back and forth): hearts, happy eyes, eventually a dance
 - He watches a nearby pointer and glances at it now and then (on KDE Wayland a KWin
-  script reports the pointer over D-Bus, since XWayland can't see it over other apps)
+  script reports the pointer over D-Bus, since XWayland can't see it over other apps).
+  Even while coding he looks up at a pointer that comes close (briefly, with a cooldown)
+  and beams if you pet him, without stopping typing
+- His own filler (walks, dances, visits, reading...) only happens when Claude Code isn't
+  working and you're not playing with him; it gives way to Claude Code at once. After
+  5 minutes with nothing happening he winds down (longer rests, more naps)
 - He roams between monitors: walks off a taller screen and drops, climbs a ladder up or
   down, sometimes leaps; he visits desktop icons (rides his cloud up, stands on them,
   hangs off them)

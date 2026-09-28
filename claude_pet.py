@@ -71,8 +71,12 @@ LABELS = {
     "cloud": "Ride the cloud", "race": "Go karting", "lurk": "Peek from the edge",
     "sleep": "Nap", "climb": "Climb to the other screen", "leap": "Leap to the other screen",
     "visit": "Visit a desktop icon", "read": "Read something from a desktop folder",
+    "work": "Typing (Claude Code working)", "attention": "Calling you over (a permission)",
+    "celebrate": "Celebrating (Claude Code done)",
 }
-PLAYABLE = set(ACTIONS + BETWEEN_SCREENS + ["visit", "read", "idle", "work", "attention", "celebrate"])
+AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["visit", "read"]
+CLAUDE_PREVIEWS = ["work", "attention", "celebrate"]
+PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + ["idle"])
 
 # Where the eyes sit in the idle pose (top-left of each 2x2 eye).
 EYES = ((6, 2), (16, 2))
@@ -136,6 +140,12 @@ LADDER_W = 10
 LADDER_PALETTE = {"d": RAIL_DARK, "l": RAIL_LIGHT}
 
 CURSOR_NEAR = 70              # sprite pixels: how close the pointer must be for him to watch it
+GLANCE_MS = 1400              # a look up from the laptop at a nearby pointer lasts this long
+GLANCE_COOLDOWN = 6000        # ...and won't happen again for this long (just a moment each time)
+TYPING_EYES = ((12, 12), (20, 12))    # the eyes in Clawd-Laptop's typing frames (3/4 view)
+REST = (8000, 20000)          # idle time between the things he does on his own
+REST_SLEEPY = (15000, 35000)  # ...once nothing has happened for WIND_DOWN
+WIND_DOWN = 5 * 60_000
 
 # Deep links the Claude desktop app itself uses (its launcher actions).
 CLAUDE_LINKS = {
@@ -256,6 +266,27 @@ def climb_rows(idle):
     return ["".join(r) for r in rows]
 
 
+def typing_eyes(rows, kind, body, ink):
+    """A Clawd-Laptop typing frame with different eyes (3/4 view, so the far
+    eye sits on the edge of his face and can't move further right)."""
+    g = [list(r) for r in rows]
+    for ex, ey in TYPING_EYES:
+        for dx in (0, 1):
+            for dy in (0, 1):
+                g[ey + dy][ex + dx] = body
+    (lx, ly), (rx, ry) = TYPING_EYES
+    if kind == "happy":
+        g[ly][lx] = g[ly][lx + 1] = g[ly + 1][lx - 1] = g[ly + 1][lx + 2] = ink
+        g[ry][rx] = g[ry][rx + 1] = g[ry + 1][rx - 1] = ink
+    else:                                      # looking up from the screen, left or right
+        d = -1 if kind == "look_l" else 0
+        for ex, ey in TYPING_EYES:
+            for dx in (0, 1):
+                for dy in (-1, 0):
+                    g[ey + 1 + dy][ex + dx + d] = ink
+    return ["".join(r) for r in g]
+
+
 def hang_rows(idle):
     """Hanging by both hands: the idle body with both arms raised the way
     Clawd-Jumping raises them."""
@@ -317,6 +348,17 @@ class Sprites:
         self.anims["climb"] = Anim("climb", {
             "size": [self.iw, self.ih + 4], "home": [0, 4],
             "frames": [{"ms": 130, "rows": left}, {"ms": 130, "rows": right}]}, palette)
+        # Clawd-Laptop's typing loop with other eyes: looking up at you (left
+        # or right) and happy, for reacting to the pointer without stopping
+        laptop = data["animations"]["laptop"]
+        lo, hi = laptop["loop"]
+        typing = [laptop["frames"][i] for i in range(lo, hi + 1)]
+        body, ink = idle[0][4], idle[EYES[0][1]][EYES[0][0]]
+        for kind in ("look_l", "look_r", "happy"):
+            self.anims["type_" + kind] = Anim("type_" + kind, {
+                "size": laptop["size"], "home": laptop["home"], "loop": [0, len(typing) - 1],
+                "frames": [{"ms": f["ms"], "rows": typing_eyes(f["rows"], kind, body, ink)} for f in typing]},
+                palette)
         self.anims["hang"] = Anim("hang", {
             "size": [self.iw, self.ih + 4], "home": [0, 4],
             "frames": [{"ms": 350, "rows": hang_rows(idle)}]}, palette)
@@ -799,6 +841,9 @@ class ClawdPet(QWidget):
         self.server = None
 
         self.cursor = None             # (x, y, when) of the pointer, when known
+        self._glance_until = self._glance_cooldown = -1.0
+        self._glance_dir = "look_l"
+        self._last_activity = 0.0      # last time you or Claude Code did anything
         self._poll_cursor = False
         self._polled = 0.0
         self._tracking = False
@@ -981,6 +1026,8 @@ class ClawdPet(QWidget):
         """Switch to a behaviour. `manual` marks one you asked for (menu, click,
         socket, petting): Claude Code events wait for it to finish."""
         self.manual = manual
+        if manual:
+            self._last_activity = self.now
         self._leave_cloud()                     # interrupted mid-scene: drop the props
         self.layers = {}
         self.vx = 0.0 if not self.airborne else self.vx
@@ -1011,8 +1058,24 @@ class ClawdPet(QWidget):
         else:
             self.start("idle")
 
+    def _rest_range(self):
+        return REST_SLEEPY if self.now - self._last_activity > WIND_DOWN else REST
+
+    def _engaged(self):
+        """Is the pointer near him and moving (you're playing with him)?"""
+        if self.now < self._petting_until:
+            return True
+        c = self.cursor
+        if c is None or self.now - c[2] > 3000:
+            return False
+        left, right = self.box_span()
+        near = CURSOR_NEAR * self.scale
+        return abs(c[0] - (left + right) / 2) < near and abs(c[1] - self._mid()) < near
+
     def _pick_action(self):
         weights = dict(WEIGHTS)
+        if self.now - self._last_activity > WIND_DOWN:
+            weights["sleep"] = 25                 # nothing's happened for a while: nap time
         if self._lurk_side() is None:
             weights["lurk"] = 0
         if self._icons_here():
@@ -1136,7 +1199,7 @@ class ClawdPet(QWidget):
             if not isinstance(msg, dict):
                 continue
             if msg.get("cmd") == "play" and msg.get("action") in PLAYABLE:
-                self.start(msg["action"], manual=True)
+                self.play(msg["action"])
             elif msg.get("cmd") == "icons":
                 icons = [[n, r.x(), r.y(), r.width(), r.height(), d] for n, r, d in self.icon_source()]
                 conn.write((json.dumps(icons) + "\n").encode())
@@ -1157,6 +1220,7 @@ class ClawdPet(QWidget):
 
     def claude_event(self, msg):
         self.last_message = msg
+        self._last_activity = self.now
         ev, sid = msg.get("event", ""), msg.get("session") or "?"
         s = self.sessions.setdefault(sid, {"state": "idle", "since": self.now, "seen": self.now})
         s["seen"] = self.now
@@ -1194,9 +1258,10 @@ class ClawdPet(QWidget):
         """Switch to what Claude Code needs now, unless he's doing something you
         asked for or is in the middle of something physical; either way _next()
         catches up the moment he's done."""
-        if (self.manual or self.dragging or self.airborne or self.scripted
-                or self.action in ("held", "fall", "climb", "leap", "visit", "read")):
+        if self.manual or self.dragging or self.airborne or self.action in ("held", "fall"):
             return
+        # Anything else he's doing is his own idea, so Claude Code comes first,
+        # even halfway up a ladder: the props vanish and he drops to the floor.
         mode = self.claude_mode()
         if mode == "attention" and self.action != "attention":
             self.start("attention")
@@ -1205,6 +1270,13 @@ class ClawdPet(QWidget):
         elif mode is None and self.greet and self.action == "idle":
             self.greet = False
             self.start("wave")
+
+    def play(self, action):
+        """Something you asked for (menu or socket): runs to the end."""
+        if action in ("work", "attention"):
+            self.start(action, manual=True, demo=True)
+        else:
+            self.start(action, manual=True)
 
     def click_kind(self):
         return "needs-input" if self.claude_mode() == "attention" else "continue"
@@ -1229,6 +1301,8 @@ class ClawdPet(QWidget):
         self._pet_flips = [t for t in self._pet_flips if self.now - t < 1500]
         if over and len(self._pet_flips) >= 3:      # stroked back and forth: petting
             self._petting_until = self.now + 500
+        if self._engaged():
+            self._last_activity = self.now
 
     def _petting(self, dt):
         petting = self.now < self._petting_until
@@ -1251,7 +1325,8 @@ class ClawdPet(QWidget):
 
     def _watch_cursor(self):
         """While idle, follow a nearby, moving pointer with his eyes."""
-        if self.action not in ("idle", "visit") or self.frame[0] != "pose" or self.now < self._petting_until:
+        if (self.action not in ("idle", "visit", "attention") or self.frame[0] != "pose"
+                or self.now < self._petting_until):
             self._tracking = False
             return
         eyes = None
@@ -1435,8 +1510,8 @@ class ClawdPet(QWidget):
     def _act_idle(self):
         self.pose("idle")
         yield from self._come_back()
-        end, t = random.uniform(5000, 14000), 0.0
-        while t < end:
+        end, t = random.uniform(*self._rest_range()), 0.0
+        while t < end or self._engaged():         # while you're playing with him, he stays with you
             hold = random.uniform(1500, 4000)
             yield hold
             t += hold
@@ -1665,33 +1740,67 @@ class ClawdPet(QWidget):
     def _act_race(self):
         yield from self._ride("race", RACE_SPEED)
 
-    def _act_laptop(self, until_idle=False):
+    def _act_laptop(self, until_idle=False, duration=None):
         mirror = self._mirror_for("laptop")
         self.pad = self._pads("laptop", mirror)
         a = self.sp.anims["laptop"]
         yield from self._play("laptop", range(0, a.loop[0]), mirror)
-        steps, typed, end = self._loop("laptop", mirror), 0.0, random.uniform(3000, 9000)
+        lo, hi = a.loop
+        i, typed = lo, 0.0
+        end = duration if duration is not None else random.uniform(3000, 9000)
         while (self.claude_mode() == "busy") if until_idle else typed < end:
-            ms = next(steps)
-            typed += ms
-            yield ms
+            # Still typing, but he looks up at you, or beams while you pet him.
+            react = self._typing_reaction()
+            if react is None:
+                self.show_frame("laptop", i, mirror)
+            else:
+                if mirror and react in ("look_l", "look_r"):
+                    react = "look_r" if react == "look_l" else "look_l"
+                self.show_frame("type_" + react, i - lo, mirror)
+            yield a.ms[i]
+            typed += a.ms[i]
+            i = lo if i == hi else i + 1
         c, d = a.outro
         yield from self._play("laptop", range(c, d + 1), mirror)
 
-    def _act_work(self):
-        """Typing on the laptop for as long as Claude Code is busy."""
-        yield from self._come_back()
-        yield from self._act_laptop(until_idle=True)
+    def _typing_reaction(self):
+        """While typing: happy eyes while you pet him, and a quick look at a
+        pointer that comes close, just for a moment (then a cooldown)."""
+        if self.now < self._petting_until:
+            return "happy"
+        if self.now < self._glance_until:
+            return self._glance_dir
+        c = self.cursor
+        if c is None or self.now - c[2] > 700 or self.now < self._glance_cooldown:
+            return None
+        left, right = self.box_span()
+        cx, near = (left + right) / 2, CURSOR_NEAR * self.scale
+        if abs(c[0] - cx) < near and abs(c[1] - self._mid()) < near:
+            self._glance_dir = "look_l" if c[0] < cx else "look_r"
+            self._glance_until = self.now + GLANCE_MS
+            self._glance_cooldown = self.now + GLANCE_COOLDOWN
+            return self._glance_dir
+        return None
 
-    def _act_attention(self):
-        """Claude Code needs you: wave with a "!" until it's answered."""
+    def _act_work(self, demo=False):
+        """Typing on the laptop for as long as Claude Code is busy (or a while, as a preview)."""
+        yield from self._come_back()
+        if demo:
+            yield from self._act_laptop(duration=8000)
+        else:
+            yield from self._act_laptop(until_idle=True)
+
+    def _act_attention(self, demo=False):
+        """Claude Code needs you: wave with a "!" until it's answered (or a while, as a preview)."""
         yield from self._come_back()
         self._bubble(True)
-        while self.claude_mode() == "attention":
+        start = self.now
+        waiting = lambda: self.claude_mode() == "attention" or (demo and self.now - start < 6000)  # noqa: E731
+        while waiting():
             yield from self._once("wave")
             self.pose("idle")
             t = 0
-            while t < 2500 and self.claude_mode() == "attention":
+            while t < 2500 and waiting():
                 yield 100
                 t += 100
         self._bubble(False)
@@ -2071,9 +2180,11 @@ class ClawdPet(QWidget):
         m.addAction("Open claude.ai").triggered.connect(lambda _=False: open_claude_web())
         m.addSeparator()
         play = m.addMenu("Play")
-        for key in ACTIONS + BETWEEN_SCREENS:
-            play.addAction(LABELS[key]).triggered.connect(
-                lambda _=False, k=key: self.start(k, manual=True))
+        for group in (ACTIONS, AROUND_THE_DESKTOP, CLAUDE_PREVIEWS):
+            if play.actions():
+                play.addSeparator()
+            for key in group:
+                play.addAction(LABELS[key]).triggered.connect(lambda _=False, k=key: self.play(k))
         size = m.addMenu("Size")
         group = QActionGroup(size)
         for label, s in SCALES.items():

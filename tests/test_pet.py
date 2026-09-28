@@ -138,6 +138,7 @@ class Pet(unittest.TestCase):
     def test_idle_eventually_picks_actions_and_stays_on_screen(self):
         seen, screens = set(), set()
         for _ in range(int(30 * 60_000 / 16)):          # thirty simulated minutes
+            self.pet._last_activity = self.pet.now      # as if you'd been around
             self.pet.advance(16)
             seen.add(self.pet.action)
             if self.pet.action == "idle" and self.pet.wait > 100:
@@ -477,6 +478,74 @@ class ClaudeHooks(unittest.TestCase):
         c.close()
 
 
+class OnlyWhenIdle(unittest.TestCase):
+    def setUp(self):
+        random.seed(13)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def test_his_own_scenes_give_way_to_claude_code_even_mid_air(self):
+        pet = self.pet
+        pet.icon_source = lambda: [("Old Firefox Data", QRect(24, 338, 64, 64), True)]
+        pet.set_box_left(300)
+        pet.y = pet.ground_y()
+        pet.start("read")                                        # his own idea
+        self.assertTrue(run_ms(pet, 60_000, until=lambda: pet.lift > 0))   # up on the cloud
+        pet.claude_event({"event": "UserPromptSubmit", "session": "a"})
+        self.assertTrue(run_ms(pet, 15_000, until=lambda: pet.action == "work" and pet.lift == 0
+                               and abs(pet._feet() - 1530) < 1))
+        self.assertEqual((pet.layers, pet.front), ({}, None))
+
+    def test_no_filler_while_you_are_playing_with_him(self):
+        pet = self.pet
+        pet.start("idle")
+        left, right = pet.box_span()
+        for i in range(int(90_000 / 200)):                       # pointer hovering nearby for 90 s
+            pet.cursor_moved(left - 60 - (i % 5) * 10, pet._mid())
+            run_ms(pet, 200)
+            self.assertEqual(pet.action, "idle")
+
+    def test_he_winds_down_when_nothing_happens_for_a_while(self):
+        pet = self.pet
+        fresh = pet._rest_range()
+        pet.now = pet._last_activity + 6 * 60_000
+        self.assertGreater(pet._rest_range()[0], fresh[0])
+        picks = [pet._pick_action() for _ in range(400)]
+        self.assertGreater(picks.count("sleep"), 40)
+
+
+class Previews(unittest.TestCase):
+    def setUp(self):
+        random.seed(17)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def test_the_play_menu_has_everything(self):
+        from PyQt6.QtWidgets import QMenu
+        menu = self.pet.fill_menu(QMenu())
+        play = next(a.menu() for a in menu.actions() if a.text() == "Play")
+        texts = {a.text() for a in play.actions()}
+        for key in cp.ACTIONS + cp.BETWEEN_SCREENS + ["visit", "read", "work", "attention", "celebrate"]:
+            self.assertIn(cp.LABELS[key], texts, key)
+
+    def test_claude_code_previews_run_without_claude_code(self):
+        self.pet.start("work", manual=True, demo=True)
+        run_ms(self.pet, 4000)
+        self.assertEqual((self.pet.action, self.pet.frame[1]), ("work", "laptop"))
+        self.assertTrue(run_ms(self.pet, 15_000, until=lambda: self.pet.action != "work"))
+        self.pet.start("attention", manual=True, demo=True)
+        run_ms(self.pet, 500)
+        self.assertTrue(any(q["kind"] == "bubble" for q in self.pet.particles))
+        self.assertTrue(run_ms(self.pet, 15_000, until=lambda: self.pet.action != "attention"))
+        self.assertFalse(any(q["kind"] == "bubble" for q in self.pet.particles))
+
+
 class CursorReactions(unittest.TestCase):
     def setUp(self):
         random.seed(9)
@@ -509,6 +578,52 @@ class CursorReactions(unittest.TestCase):
             happy = happy or self.pet.frame == ("pose", "happy", False)
         self.assertTrue(hearts, "no hearts")
         self.assertTrue(happy or self.pet.action == "dance")
+
+    def working(self):
+        self.pet.claude_event({"event": "UserPromptSubmit", "session": "a"})
+        self.assertTrue(run_ms(self.pet, 5000, until=lambda: self.pet.frame[:2] == ("anim", "laptop")
+                               and self.pet.frame[2] >= self.pet.sp.anims["laptop"].loop[0]))
+
+    def test_he_glances_up_from_the_laptop_at_a_nearby_pointer(self):
+        self.working()
+        left, _ = self.pet.box_span()
+        self.pet.cursor_moved(left - 100, self.pet._mid())
+        run_ms(self.pet, 200)
+        self.assertEqual(self.pet.frame[1], "type_look_l")
+        self.assertEqual(self.pet.action, "work")                # still at it
+        run_ms(self.pet, 2000)
+        self.assertEqual(self.pet.frame[1], "laptop")            # only for a moment
+        self.pet.cursor_moved(left - 110, self.pet._mid())
+        run_ms(self.pet, 200)
+        self.assertEqual(self.pet.frame[1], "laptop")            # not again straight away
+        run_ms(self.pet, 6000)
+        self.pet.cursor_moved(left - 100, self.pet._mid())
+        run_ms(self.pet, 200)
+        self.assertEqual(self.pet.frame[1], "type_look_l")
+
+    def test_petting_him_while_he_codes(self):
+        self.working()
+        left, right = self.pet.box_span()
+        cx, mid = (left + right) / 2, self.pet._mid()
+        happy = hearts = False
+        for i in range(30):
+            self.pet.cursor_moved(cx + (25 if i % 2 else -25), mid)
+            run_ms(self.pet, 80)
+            happy = happy or self.pet.frame[1] == "type_happy"
+            hearts = hearts or any(q["kind"] == "heart" for q in self.pet.particles)
+        self.assertTrue(happy and hearts)
+        self.assertEqual(self.pet.action, "work")
+
+    def test_typing_eyes_are_where_the_official_frames_have_them(self):
+        with open(cp.SPRITES) as f:
+            laptop = json.load(f)["animations"]["laptop"]
+        lo, hi = laptop["loop"]
+        for i in range(lo, hi + 1):
+            rows = laptop["frames"][i]["rows"]
+            for ex, ey in cp.TYPING_EYES:
+                cells = {rows[ey + dy][ex + dx] for dx in (0, 1) for dy in (0, 1)}
+                self.assertEqual(cells, {rows[ey][ex]}, f"frame {i}")
+                self.assertNotEqual(rows[ey][ex], rows[ey][ex - 1])   # ink, not body
 
     def test_kwin_script_reports_to_our_service(self):
         js = cp.kwin_cursor_script()
