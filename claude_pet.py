@@ -3966,17 +3966,39 @@ class ClawdPet(QWidget):
             self._streak_at = self.now
             self.start("coffee", manual=True, stay=random.uniform(12_000, 20_000))
 
-    def _go_to_you(self):
-        """Run over toward the pointer (as far as what he's standing on goes), if it's far off."""
-        c = self.cursor
-        if c is None or not self.prefs["pointer"]:
+    def _focus_area(self):
+        """The screen you're working on: your active window's, else the pointer's."""
+        names = [sc.name() for sc in QApplication.screens()]
+        areas = screen_areas()
+        active = next((w for w in self.window_list if w["active"] and w["output"] in names), None)
+        if active is not None:
+            return areas[names.index(active["output"])]
+        if self.cursor is not None:
+            a = area_at(self.cursor[0], self.cursor[1])
+            if a is not None:
+                return a
+        return self.screen_geometry()
+
+    def _go_to_focus(self):
+        """To the middle of the screen you're working on: a trot if he's on its
+        floor already, one big leap across if he's on the other screen (or up
+        on a window)."""
+        area = self._focus_area()
+        s, wpx = self.scale, self.iw * self.scale
+        target = area.left() + area.width() / 2 - wpx / 2
+        floor = area.top() + area.height()
+        left = self.box_span()[0]
+        if abs(self._feet() - floor) < 2 and self.screen_geometry() == area:
+            if abs(target - left) > 30 * s:
+                yield from self._walk_to(target)
+                self.pose("idle")
             return
-        left, right = self.box_span()
-        room_l, room_r = self._room()
-        target = min(max(c[0] - (right - left) / 2, left - room_l + 20), right + room_r - (right - left) - 20)
-        if abs(target - left) > 250:
-            yield from self._walk_to(target)
-            self.pose("idle")
+        self.show_frame("jump", 1)                          # over there: one big leap
+        yield 160
+        self.show_frame("jump", 2)
+        yield from self._arc_to(target, floor, 30 * s)
+        yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
+        self.pose("idle")
 
     def _act_remind_water(self):
         """Water time. For the first couple of minutes as loud as he gets: he
@@ -3989,11 +4011,11 @@ class ClawdPet(QWidget):
         n = 0
         while True:
             if self._loud():
-                if n % 3 == 0:
-                    yield from self._go_to_you()
+                if n % 2 == 0:
+                    yield from self._go_to_focus()      # the middle of the screen you're on
                 n += 1
-                for _ in range(3):
-                    yield from self._hop_with_bottle()
+                for k in range(3):                     # jumping about, side to side
+                    yield from self._hop_with_bottle(12 * self.scale * (1 if (n + k) % 2 else -1))
                 self.layers = {"water_bottle": BOTTLE_SIDE}
                 self.pose(self._glance())
                 yield 1900
@@ -4004,7 +4026,7 @@ class ClawdPet(QWidget):
                 if random.random() < 0.2:
                     yield from self._hop_with_bottle()
 
-    def _hop_with_bottle(self):
+    def _hop_with_bottle(self, dx=0.0):
         bx, by = BOTTLE_UP
         self.show_frame("jump", 1)                 # crouch, bottle at his side
         self.layers = {"water_bottle": BOTTLE_CROUCH}
@@ -4012,6 +4034,7 @@ class ClawdPet(QWidget):
         self.show_frame("cheer", 0)
         for lift in (2, 4, 5, 5, 4, 2, 0):
             self.lift = lift
+            self.x += dx / 7                        # a hop to the side
             self.layers = {"water_bottle": (bx, by - lift)}
             if lift == 5 and random.random() < 0.8:   # a splash from the top of the bottle
                 for _ in range(2):
@@ -4047,7 +4070,7 @@ class ClawdPet(QWidget):
         yield from self._come_back()
         self._reminder_bits(True)
         if self._loud():
-            yield from self._go_to_you()
+            yield from self._go_to_focus()
         while True:
             loud = self._loud()
             self.pose(self._glance())

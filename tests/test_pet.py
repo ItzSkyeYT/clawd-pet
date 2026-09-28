@@ -1870,6 +1870,8 @@ class Reminders(unittest.TestCase):
         self.assertIn("water_bubble", self.bits())
 
     def test_he_hops_waving_the_bottle_with_the_bubble_and_button_up(self):
+        geo = self.pet.screen_geometry()
+        self.pet.set_box_left(geo.left() + geo.width() / 2 - self.pet.iw * self.pet.scale / 2)
         self.reminded()
         lifts, droplets = set(), False
         for _ in range(int(5000 / 16)):
@@ -1882,15 +1884,57 @@ class Reminders(unittest.TestCase):
         self.assertIn(5, lifts)
         self.assertTrue(droplets)
 
-    def test_he_runs_over_to_you_first(self):
-        geo = self.pet.screen_geometry()
-        self.pet.set_box_left(geo.left() + 100)
-        far = geo.left() + geo.width() - 200
-        self.pet.cursor_moved(far, geo.top() + 300)
+    HDMI = [1920, 0, 1920, 1080, 5, 0, 1, "HDMI-A-1", "ed"]       # you're working over there
+    LAPTOP = [0, 330, 1920, 1200, 5, 0, 1, "eDP-1", "ed"]
+
+    def middle(self):
+        return sum(self.pet.box_span()) / 2
+
+    def put(self, box_left):
+        """Stand him at `box_left`, on the floor there."""
+        self.pet.set_box_left(box_left)
+        self.pet.y = self.pet.ground_y()
+        self.pet.start("idle")
+        self.pet.advance(16)
+
+    def test_it_takes_him_to_the_middle_of_the_screen_you_are_on(self):
+        self.put(200)                                               # he's on the laptop screen
+        self.pet.windows_changed([self.HDMI])
         self.reminded()
-        self.assertTrue(run_ms(self.pet, 30_000, until=lambda: self.pet.frame[1] == "cheer"))
-        left, right = self.pet.box_span()
-        self.assertLess(abs((left + right) / 2 - far), 300)
+        self.assertTrue(run_ms(self.pet, 20_000, until=lambda: self.pet.frame[1] == "cheer"))
+        self.assertAlmostEqual(self.middle(), 1920 + 960, delta=80)
+        self.assertAlmostEqual(self.pet._feet(), 1080, delta=1)
+
+    def test_on_that_screen_already_he_trots_over(self):
+        self.put(100)
+        self.pet.windows_changed([self.LAPTOP])
+        self.reminded()
+        seen = set()
+        self.assertTrue(run_ms(self.pet, 30_000, until=lambda: seen.add(self.pet.frame[1])
+                               or self.pet.frame[1] == "cheer"))
+        self.assertIn("walk", seen)
+        self.assertAlmostEqual(self.middle(), 960, delta=80)
+
+    def test_he_jumps_about_there(self):
+        self.pet.windows_changed([self.LAPTOP])
+        self.put(960 - self.pet.iw * self.pet.scale / 2)
+        self.reminded()
+        xs = []
+        for _ in range(int(8000 / 16)):
+            self.pet.advance(16)
+            xs.append(self.middle())
+        self.assertGreater(max(xs) - min(xs), 10 * self.pet.scale)   # hopping from side to side...
+        self.assertLess(max(abs(x - 960) for x in xs), 40 * self.pet.scale)   # ...around the middle
+
+    def test_he_follows_you_to_the_other_screen(self):
+        self.pet.windows_changed([self.LAPTOP])
+        self.put(900)
+        self.reminded()
+        run_ms(self.pet, 3000)
+        self.pet.windows_changed([self.HDMI])                      # you moved over there
+        self.assertTrue(run_ms(self.pet, 20_000, until=lambda: self.middle() > 1920 and not self.pet.scripted
+                               and self.pet.frame[1] == "cheer"))
+        self.assertAlmostEqual(self.middle(), 1920 + 960, delta=80)
 
     def test_it_stays_until_you_press_done_and_calms_down(self):
         self.reminded()
