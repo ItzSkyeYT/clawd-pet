@@ -296,8 +296,8 @@ SHAKE_FLIPS = 4               # quick back-and-forths within SHAKE_MS shake him 
 SHAKE_MS = 1300
 SHAKE_SPEED = 700             # px/s: how fast a move must be to count toward a shake
 STRAIGHT, LEAN_1, LEAN_2, KICK_A, KICK_B, ONE_HAND = range(6)   # the dangle frames
-SPIN_STEPS = 24               # frames all the way round when you whirl him (15 degrees apart)
-SPIN_FROM = 0.52              # radians: past this he's drawn turned, not in the hand-drawn leans
+SPIN_STEPS = 48               # frames all the way round when he swings (7.5 degrees apart)
+SPIN_FROM = 0.52              # radians: past this he's spinning, not just swinging
 SWING_DAMP = 1.5              # 1/s: how quickly his swinging dies down
 AWAY = 10 * 60_000            # no pointer movement or prompt for this long: you're away (a break)
 PRESENT = 90_000              # reminders only come while you've done something this recently
@@ -818,7 +818,7 @@ class Sprites:
         spin_home = [size // 2 - (pivot[0] - dg_home[0]), size // 2 - (pivot[1] - dg_home[1])]
         self._spin = {"rows": straight, "eyes": eyes[STRAIGHT], "pivot": pivot, "size": size,
                       "home": spin_home, "palette": dg_pal, "home_y": dg_home[1], "extras": extras}
-        for kind in ("happy", "surprised"):
+        for kind in ("idle", "happy", "surprised"):
             self.spin_anim(kind, None)
 
         # which way the lean frames swing him (+1: to the frame's right)
@@ -853,7 +853,8 @@ class Sprites:
         """The frames of him whirled right round (see turned_frames), with
         `face`, and `hat` baked in so it goes round with him. Built the first
         time they're wanted."""
-        name = "spin_" + face + ("_" + hat if hat else "")
+        name = "spin_" + ("" if face == "idle" else face) + ("_" + hat if hat else "")
+        name = name.replace("spin__", "spin_").rstrip("_")
         if name in self.anims:
             return name
         sp = self._spin
@@ -3766,28 +3767,12 @@ class ClawdPet(QWidget):
                     self._emit("spark", 0, 0, life=2600,
                                orbit=(self.iw / 2 - 1, -1.5, 8.0, 2.0, 5.0, 2 * math.pi * k / 3))
                 face, face_until = "squeezed", self.now + 2600
-            # what he looks like
+            # what he looks like: his face, then which frame
             swing = abs(self._swing)
-            if swing > SPIN_FROM:                    # turned round: the rotated frames
-                k = round(self._swing / (2 * math.pi / SPIN_STEPS)) % SPIN_STEPS
-                hat = self.hat()
-                self.show_frame(self.sp.spin_anim("surprised" if abs(self._swing_v) > 6 else "happy", hat), k)
-                self._place_on_pointer()
-                yield TICK_MS
-                continue
+            idx = None
             if tired_at is not None:
                 idx, face = ONE_HAND, "squeezed"
             else:
-                if swing > 0.4:
-                    idx = LEAN_2
-                elif swing > 0.14:
-                    idx = LEAN_1
-                elif self.now < kick_until:
-                    idx = KICK_A if int(self.now // 220) % 2 == 0 else KICK_B
-                else:
-                    idx = STRAIGHT
-                    if self.now >= kick_at:
-                        kick_until, kick_at = self.now + 1300, self.now + random.uniform(4000, 9000)
                 if self.now < face_until and face == "squeezed":
                     pass                                # still seeing stars
                 elif swing > 0.5 or abs(ax) > 25_000:
@@ -3797,10 +3782,21 @@ class ClawdPet(QWidget):
                 elif self.now >= face_until:
                     face = "idle" if random.random() < 0.97 else random.choice(("look_l", "look_r", "happy"))
                     face_until = self.now + (900 if face != "idle" else 0)
-            side = 1 if self._swing >= 0 else -1     # which side of the pointer he hangs
-            mirror = idx in (LEAN_1, LEAN_2, ONE_HAND) and side != self.sp.dangle_lean
-            shown = {"look_l": "look_r", "look_r": "look_l"}.get(face, face) if mirror else face
-            self.show_frame("dangle" if shown == "idle" else "dangle_" + shown, idx, mirror)
+                if swing < math.pi / SPIN_STEPS and abs(self._swing_v) < 1.5:   # hanging still
+                    if self.now < kick_until:
+                        idx = KICK_A if int(self.now // 220) % 2 == 0 else KICK_B
+                    else:
+                        idx = STRAIGHT
+                        if self.now >= kick_at:
+                            kick_until, kick_at = self.now + 1300, self.now + random.uniform(4000, 9000)
+            if idx is None:
+                # swinging: his hang turned about his hands, all the way round if
+                # need be, always the same drawing so nothing jumps as he goes
+                k = round(self._swing / (2 * math.pi / SPIN_STEPS)) % SPIN_STEPS
+                self.show_frame(self.sp.spin_anim(face, self.hat()), k)
+            else:
+                mirror = idx == ONE_HAND and (1 if self._swing >= 0 else -1) != self.sp.dangle_lean
+                self.show_frame("dangle" if face == "idle" else "dangle_" + face, idx, mirror)
             self._place_on_pointer()
             yield TICK_MS
         yield from self._let_go(vx, vy)

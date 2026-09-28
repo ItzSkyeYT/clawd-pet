@@ -2166,15 +2166,17 @@ class GrabThePointer(unittest.TestCase):
     def test_he_swings_behind_when_you_pull_him_along(self):
         x, y = self.hang_on()
         run_ms(self.pet, 500)
-        leans = []
+        trailing = []
         for k in range(1, 20):
             self.pet.cursor_moved(x + 25 * k, y)               # quickly to the right
             self.pet.advance(16)
-            if self.pet.frame[2] in (cp.LEAN_1, cp.LEAN_2):
-                leans.append(self.pet.frame)
-        self.assertTrue(leans)
-        # drawn hanging off to the left of the pointer, trailing behind it
-        self.assertTrue(all((-1 if f[3] else 1) * self.pet.sp.dangle_lean < 0 for f in leans), leans)
+            f, sw = self.pet.frame, self.pet._swing
+            if f[1].startswith("spin"):
+                trailing.append(sw)
+                step = 2 * math.pi / cp.SPIN_STEPS
+                self.assertEqual(f[2], round(sw / step) % cp.SPIN_STEPS)   # drawn at the angle he's at
+        self.assertTrue(trailing)
+        self.assertLess(min(trailing), -0.1)                  # hanging back, behind the pointer
         run_ms(self.pet, 3000)                                # it stops: he settles under it
         self.assertLess(abs(self.pet._swing), 0.14)
 
