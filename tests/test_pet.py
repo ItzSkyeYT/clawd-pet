@@ -746,6 +746,57 @@ class DesktopIcons(unittest.TestCase):
         self.assertTrue(hanging)
 
 
+class Lifecycle(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def test_restart_runs_this_script_again_with_the_original_environment(self):
+        cmd = cp.restart_command()
+        self.assertEqual(cmd[:2], [sys.executable, os.path.join(ROOT, "claude_pet.py")])
+        old = cp._FORCED_XCB
+        try:
+            cp._FORCED_XCB = True       # he'll force XWayland again himself
+            env = cp.env_for_restart({"QT_QPA_PLATFORM": "xcb", "HOME": "/h"})
+            self.assertNotIn("QT_QPA_PLATFORM", env)
+            self.assertEqual(env["HOME"], "/h")
+        finally:
+            cp._FORCED_XCB = old
+
+    def test_start_at_login_toggles_an_autostart_entry(self):
+        entry = os.path.join(self.tmp, "autostart", "clawd-pet.desktop")
+        launcher = os.path.join(self.tmp, "applications", "clawd-pet.desktop")
+        self.assertFalse(cp.autostart_enabled(entry))
+        cp.set_autostart(True, entry, launcher, icon_dir=self.tmp)
+        self.assertTrue(cp.autostart_enabled(entry))
+        text = open(entry).read()
+        self.assertTrue(text.startswith("[Desktop Entry]"))
+        self.assertIn("Exec=" + sys.executable + " " + os.path.join(ROOT, "claude_pet.py"), text)
+        self.assertIn("Icon=" + os.path.join(self.tmp, "clawd.png"), text)
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, "clawd.png")))
+        self.assertTrue(os.path.exists(launcher))           # also in the app launcher
+        cp.set_autostart(False, entry, launcher, icon_dir=self.tmp)
+        self.assertFalse(os.path.exists(entry))
+        self.assertTrue(os.path.exists(launcher))           # still startable by hand
+
+    def test_a_second_clawd_notices_the_first(self):
+        sock = os.path.join(self.tmp, "pet.sock")
+        self.assertFalse(cp.already_running(sock))
+        pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.assertTrue(pet.listen(sock))
+        self.assertTrue(cp.already_running(sock))
+        pet.timer.stop()
+        pet.server.close()
+        self.assertFalse(cp.already_running(sock))
+
+    def test_the_menu_has_restart_and_start_at_login(self):
+        from PyQt6.QtWidgets import QMenu
+        pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        menu = pet.fill_menu(QMenu())
+        texts = {a.text() for a in menu.actions()}
+        self.assertTrue({"Restart Clawd", "Start at login", "Quit"} <= texts)
+        pet.timer.stop()
+
+
 class Installer(unittest.TestCase):
     def setUp(self):
         import importlib.util

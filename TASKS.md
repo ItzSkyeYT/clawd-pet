@@ -16,11 +16,11 @@
 - [x] Ladder between screens of different heights (up and down)
 - [x] Visits desktop icons: cloud ride up, stands on them, hangs off them
 - [x] Reads a page from a desktop folder with glasses on, reacting to the story
+- [x] Start at login (XDG autostart, toggle in his menu) and "Restart Clawd"
 - [x] Tests (`python -m unittest discover -s tests -v`)
 
 ## Possible Improvements
 - [ ] Tool-specific flourishes (cloud for web searches, sparkler for subagents)
 - [ ] Auto-hide over fullscreen windows (he's unmanaged, so he floats above everything)
-- [ ] Startup on login (a .desktop file in ~/.config/autostart)
 - [ ] Trace the /btw video's poses (profile turn, thought bubble)
 - [ ] Windows installer

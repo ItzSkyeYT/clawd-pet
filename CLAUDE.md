@@ -14,6 +14,12 @@ On Wayland the app runs itself through XWayland, because a pet has to move its
 own window and Wayland doesn't allow that. Programs it launches get the normal
 environment back.
 
+- **Start at login**: tick "Start at login" in his menu (writes
+  `~/.config/autostart/clawd-pet.desktop`, and a "Clawd" entry in the app launcher)
+- **Restart**: "Restart Clawd" in his menu, or `{"cmd": "restart"}` on the socket; he
+  re-execs himself in place (same process), so it also picks up code changes
+- Only one Clawd runs at a time: a second copy sees the socket in use and exits
+
 ## Hooks (Claude Code integration)
 ```bash
 python tools/install_hooks.py            # adds async hooks to ~/.claude/settings.json

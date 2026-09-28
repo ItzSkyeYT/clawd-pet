@@ -17,8 +17,10 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -494,6 +496,91 @@ def open_claude_code(kind="continue"):
             spawn(cmd)
         return True
     return open_in_terminal()
+
+
+# ── Starting, restarting, starting at login ─────────────────────────
+
+SCRIPT = os.path.join(HERE, "claude_pet.py")
+AUTOSTART = os.path.expanduser("~/.config/autostart/clawd-pet.desktop")
+LAUNCHER = os.path.expanduser("~/.local/share/applications/clawd-pet.desktop")
+DATA_DIR = os.path.expanduser("~/.local/share/clawd-pet")
+
+
+def restart_command():
+    return [sys.executable, SCRIPT] + sys.argv[1:]
+
+
+def env_for_restart(env=None):
+    """The environment to restart in: without the XWayland override we set,
+    so the new process decides (and strips it for what it launches) itself."""
+    env = dict(os.environ if env is None else env)
+    if _FORCED_XCB:
+        env.pop("QT_QPA_PLATFORM", None)
+    return env
+
+
+def already_running(path=None):
+    """Is another Clawd listening on the socket? (A stale socket file doesn't count.)"""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1)
+        s.connect(path or socket_path())
+        s.close()
+        return True
+    except (OSError, AttributeError):
+        return False
+
+
+def _exec_arg(arg):
+    """Quote an Exec= argument the way the desktop entry spec wants."""
+    if re.search(r'[\s"\\`$]', arg):
+        return '"' + re.sub(r'(["\\`$])', r"\\\1", arg) + '"'
+    return arg
+
+
+def desktop_entry(icon, autostart=False):
+    lines = ["[Desktop Entry]", "Type=Application", "Name=Clawd", "GenericName=Desktop pet",
+             "Comment=Clawd, the Claude Code mascot, living on your desktop",
+             "Exec=" + " ".join(_exec_arg(a) for a in [sys.executable, SCRIPT]),
+             "Icon=" + icon, "Terminal=false", "StartupNotify=false", "Categories=Utility;"]
+    if autostart:
+        lines.append("X-GNOME-Autostart-enabled=true")
+    return "\n".join(lines) + "\n"
+
+
+def write_icon(folder):
+    """Clawd's idle pose as a 256px icon for the launcher and autostart entries."""
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "clawd.png")
+    idle = load_sprites().poses["idle"]
+    s = 256 // max(idle.width(), idle.height())
+    img = QImage(256, 256, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.transparent)
+    p = QPainter(img)
+    w, h = idle.width() * s, idle.height() * s
+    p.drawImage(QRect((256 - w) // 2, (256 - h) // 2, w, h), idle)
+    p.end()
+    img.save(path)
+    return path
+
+
+def autostart_enabled(entry=AUTOSTART):
+    return os.path.exists(entry)
+
+
+def set_autostart(on, entry=AUTOSTART, launcher=LAUNCHER, icon_dir=DATA_DIR):
+    """Start at login (an XDG autostart entry, which Plasma and GNOME both read).
+    Turning it on also puts Clawd in the app launcher, which stays when it's
+    turned off so he can still be started by hand."""
+    if not on:
+        if os.path.exists(entry):
+            os.remove(entry)
+        return
+    icon = write_icon(icon_dir)
+    for path, auto in ((entry, True), (launcher, False)):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(desktop_entry(icon, autostart=auto))
 
 
 def open_claude_web():
@@ -1200,6 +1287,8 @@ class ClawdPet(QWidget):
                 continue
             if msg.get("cmd") == "play" and msg.get("action") in PLAYABLE:
                 self.play(msg["action"])
+            elif msg.get("cmd") == "restart":
+                self.restart()
             elif msg.get("cmd") == "icons":
                 icons = [[n, r.x(), r.y(), r.width(), r.height(), d] for n, r, d in self.icon_source()]
                 conn.write((json.dumps(icons) + "\n").encode())
@@ -2161,6 +2250,16 @@ class ClawdPet(QWidget):
         self._press = None
         e.accept()
 
+    def restart(self):
+        """Start afresh (same process, new code): remember where he is, let
+        KWin forget the pointer script, and replace this process."""
+        self.save()
+        if self.settings is not None:
+            self.settings.sync()
+        stop_kwin_cursor_feed()
+        cmd = restart_command()
+        os.execve(cmd[0], cmd, env_for_restart())
+
     def launch_claude_code(self, kind="continue"):
         if not open_claude_code(kind) and getattr(self, "tray", None) is not None:
             self.tray.showMessage("Clawd", "No terminal found to run Claude Code in.")
@@ -2194,6 +2293,11 @@ class ClawdPet(QWidget):
             group.addAction(act)
             act.triggered.connect(lambda _=False, s=s: self.set_scale(s))
         m.addSeparator()
+        login = m.addAction("Start at login")
+        login.setCheckable(True)
+        login.setChecked(autostart_enabled())
+        login.triggered.connect(lambda on: set_autostart(on))
+        m.addAction("Restart Clawd").triggered.connect(lambda _=False: self.restart())
         m.addAction("Quit").triggered.connect(lambda _=False: QApplication.quit())
         return m
 
@@ -2215,6 +2319,9 @@ def tray_icon(sprites):
 
 
 def main():
+    if already_running():
+        print("Clawd is already running.")
+        return
     app = QApplication(sys.argv)
     app.setApplicationName("clawd-pet")
     app.setQuitOnLastWindowClosed(False)
