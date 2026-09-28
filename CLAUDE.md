@@ -45,6 +45,13 @@ to what Claude Code is doing.
 - **Right-click**: menu (Claude Code, new session, terminal, claude.ai, Play: every move,
   the desktop and time-of-day scenes, reminder previews and the Claude Code states;
   Hat, Size, Quiet mode, Settings…, start at login, restart, quit)
+- **Play goes and does it**: whatever you pick, he sets it up first. Hop down or climb
+  down from the floor: up onto a window first (a hop if one's in reach, up its side if
+  that reaches the floor, else a ladder leaned against it). Jump to another window: onto
+  one with a neighbour, then across, a long leap if that's all there is. Climb a side
+  that starts high up: he leaps for it. The ladder, a leap (up or down), an icon or a
+  folder: down off the window and over to the screen that has them. Rides and peeking
+  start on a floor. With nothing to do it with (no window, no icon), a puzzled "?"
 - **Drop a folder on him** (or a file, for its folder): a new Claude Code session there
   (`claude://code/new?folder=...`, or a terminal in it). He holds still with his arms up
   while you hover, and always takes it as a copy, never a move
@@ -89,10 +96,12 @@ to what Claude Code is doing.
   and pulls himself up, leaps across gaps from one window top to the next, rides a window
   when you move it (even mid-climb), climbs down again or walks to the brink and hops off;
   ducks out of sight while something is fullscreen on his screen
-- **Coming down from high up** (off a window or an icon, or after reading on his cloud):
-  from 30 cells up he floats down under an umbrella or a parachute, swaying, and lands
-  softly; from 70 up it's often a skydive first, spread-eagled, before he pulls the cord
-  (the pack pops, then the canopy opens). A quarter of the time it's a plain drop
+- **Coming down from high up** (off a window or an icon, after reading on his cloud,
+  letting go at the bottom of a window's side, walking off an edge or when the window
+  under him closes): from 30 cells up he always floats down under an umbrella or a
+  parachute, swaying, and lands softly; from 70 up it's often a skydive first,
+  spread-eagled, before he pulls the cord (the pack pops, then the canopy opens). A throw
+  is yours, so that stays a plain fall with a bounce
 - **A new wallpaper** makes him jump: he glances about, turns round to look (from behind
   he has no eyes), whips back with a "!" and jumps. Plasma slideshows change on the clock
   (whole multiples of the interval, 15 min by default), so he's ready for each one; a

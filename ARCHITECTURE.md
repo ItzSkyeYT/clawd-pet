@@ -111,14 +111,31 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
 
 ## Coming down softly
 - `_come_down(vx, vy)` replaces the plain drop off a window (`_act_hop_down`, after
-  walking to the brink), an icon visit and the reading cloud: `_drop_below()` measures
-  what he'd land on; under `FLOAT_FROM` cells (or a quarter of the time) it's `_fall()`,
-  else `_float_down()`, with the parachute (and maybe a skydive first) from `SKYDIVE_FROM`
+  walking to the brink), an icon visit, the reading cloud and the bottom of a climbed-down
+  side: `_drop_below()` measures what he'd land on; under `FLOAT_FROM` cells it's
+  `_fall()`, else always `_float_down()`, with the parachute (and maybe a skydive first)
+  from `SKYDIVE_FROM`. Stepping off an edge on his own (walking, skidding, the window
+  closing) goes through `_stepped_off()`, which starts `come_down` when it's that high;
+  `drop()` (your throws) stays plain physics
 - `_float_down()` waits until he's over the top of the hop and clear of the edge, then
   sets `chute`: `_physics_step` pulls his fall speed to `CHUTE_FALL` (hard, as the canopy
   catches the air), damps his drift, sways him (`CHUTE_SWAY`) and never bounces. The
   canopy is a layer placed by `_held_at()` so the art's `anchor` cell sits in the dangle
   frame's fists. `start()` packs it away if anything interrupts
+
+## Getting there (Play goes and does it)
+- A played scene sets up what it needs instead of giving up. `_get_down()` hops off
+  window tops to a floor; `_travel_to(area)` crosses screens with the ladder
+  (`_act_climb(side)`) where floors step; `_to_a_screen_with(things)` finds icons or
+  folders (`_screen_with()` works it out with `_as_if_at()`, as if he stood there)
+- `_up_onto_window(wid)`: a hop (`_window_target`), a side within reach (`_climb_target`),
+  else `_ladder_target()`: a clear column beside a window's end, from the floor up past
+  its top, where `_ladder_up_to()` leans the ladder, climbs and steps over. Tall ladders
+  take at most `LADDER_TIME`
+- Asked for, window jumps reach 3x (then any distance), a side that starts high up is
+  leapt for with a real arc, and leaps go down as well as up. `_arc_to()` keeps his head
+  on screen at the top of a long leap. `_shrug()` (a "?") answers what can't be done;
+  scenes he picks himself were only picked when possible, so they never shrug
 
 ## The wallpaper
 - `plasma_wallpapers()` reads Plasma's desktop config: each containment's wallpaper

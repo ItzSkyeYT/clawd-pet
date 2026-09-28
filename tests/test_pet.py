@@ -406,13 +406,16 @@ class OnWindows(unittest.TestCase):
         self.assertAlmostEqual(self.pet.box_span()[0], left + 100, delta=1)
         self.assertAlmostEqual(self.feet(), 850, delta=1)
 
-    def test_closing_the_window_under_him_drops_him(self):
+    def test_closing_the_window_under_him_floats_him_down(self):
         self.pet.windows_changed([[400, 900, 600, 400, 3, 0, 1, "eDP-1", "a"]])
         self.stand_on(600, 900)
         run_ms(self.pet, 200)
         self.pet.windows_changed([])
-        run_ms(self.pet, 5000, until=lambda: self.pet.action == "idle" and not self.pet.airborne)
+        layers = set()
+        run_ms(self.pet, 20_000, until=lambda: layers.update(self.pet.layers)
+               or (self.pet.action == "idle" and not self.pet.airborne))
         self.assertAlmostEqual(self.feet(), 1530, delta=1)
+        self.assertTrue(layers & {"umbrella", "parachute_1"}, layers)   # 630 px: he floats
 
     def test_an_edge_hidden_behind_another_window_is_not_a_ledge(self):
         # b sits on top of a, covering the middle of a's top edge
@@ -856,6 +859,217 @@ class FloatingDown(unittest.TestCase):
             gx, gy = self.pet._grip_in_window()
             self.assertEqual((self.pet.home_px.x() + (x + ax) * s, self.pet.home_px.y() + (y + ay) * s),
                              (gx - s, gy))                       # the anchor cell on his fists' cell
+
+
+class PlayWithAGoal(unittest.TestCase):
+    """Whatever you pick from Play, he goes and does it: up onto a window first
+    (by ladder if it's out of reach), down off one, over to the other screen."""
+    WA = [300, 700, 800, 500, 3, 0, 0, "eDP-1", "a"]           # laptop, far above the floor
+    WC = [1300, 900, 500, 400, 2, 0, 0, "eDP-1", "c"]          # laptop, a jump across from WA
+    WB = [2300, 300, 1000, 600, 1, 0, 1, "HDMI-A-1", "b"]      # HDMI
+    ICONS = [("Old Firefox Data", QRect(24, 338, 64, 64), True),
+             ("steam.desktop", QRect(24, 578, 64, 64), False)]
+
+    def setUp(self):
+        random.seed(11)
+        self.real = random.random
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.pet.icon_source = lambda: self.ICONS
+        self.pet.windows_changed([list(w) for w in (self.WA, self.WC, self.WB)])
+
+    def tearDown(self):
+        random.random = self.real
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def at(self, box_left, on=None):
+        self.pet.set_box_left(box_left)
+        self.pet.y = (self.pet.ground_y() if on is None
+                      else on[1] - self.pet.home_px.y() - self.pet.ih * self.pet.scale)
+        self.pet.start("idle")
+        self.pet.advance(16)
+
+    def play(self, action, ms=150_000):
+        """Play it through: the windows he stood on in turn (None: a floor),
+        the frames, props and whether the ladder came out."""
+        self.pet.play(action)
+        stood, frames, layers, ladder = [], set(), set(), False
+        for _ in range(int(ms / 16)):
+            self.pet.advance(16)
+            if not self.pet.airborne and not self.pet.scripted:
+                on = self.pet._window_under()
+                wid = on[3] if on else None
+                if not stood or stood[-1] != wid:
+                    stood.append(wid)
+            frames.add(self.pet.frame[1])
+            layers |= set(self.pet.layers)
+            ladder = ladder or self.pet.ladder.isVisible()
+            if self.pet.action != action:
+                break
+        self.assertNotEqual(self.pet.action, action, action + " never finished")
+        return stood, frames, layers, ladder
+
+    def floated(self, layers):
+        return bool(layers & {"umbrella", "parachute_1"})
+
+    def test_hop_up_to_a_window_out_of_reach_by_ladder(self):
+        self.at(1400)
+        stood, frames, layers, ladder = self.play("perch_window")
+        self.assertIn(stood[-1], ("a", "c"))
+        self.assertTrue(ladder)
+        self.assertIn("climb_ladder", frames)
+
+    def test_hop_down_from_the_floor_gets_up_there_first(self):
+        self.at(1400)
+        stood, frames, layers, ladder = self.play("hop_down")
+        self.assertTrue(any(w in ("a", "c") for w in stood), stood)
+        self.assertIsNone(stood[-1])
+        self.assertTrue(self.floated(layers), layers)
+
+    def test_the_umbrella_every_time_off_a_high_window(self):
+        for r in (0.05, 0.3, 0.7, 0.95):
+            random.random = lambda r=r: r
+            self.at(700, on=self.WA)
+            stood, frames, layers, ladder = self.play("hop_down")
+            self.assertTrue(self.floated(layers), (r, layers))
+
+    def test_climb_a_side_that_starts_high_up(self):
+        self.at(1400)
+        stood, frames, layers, ladder = self.play("climb_window")
+        self.assertIn("climb_side", frames)
+        self.assertIn(stood[-1], ("a", "c"))
+
+    def test_climb_down_from_the_floor(self):
+        self.at(1400)
+        stood, frames, layers, ladder = self.play("climb_down")
+        self.assertIn("climb_side", frames)
+        self.assertTrue(any(w in ("a", "c") for w in stood), stood)
+        self.assertIsNone(stood[-1])
+
+    def test_jump_to_another_window_from_the_floor(self):
+        self.at(1400)
+        stood, frames, layers, ladder = self.play("window_jump")
+        ups = [w for w in stood if w is not None]
+        self.assertTrue(len(set(ups)) >= 2 and ups[-1] != ups[0], stood)
+
+    def test_leap_either_way(self):
+        self.at(1200)                                           # laptop, up to the HDMI screen
+        self.play("leap")
+        self.assertEqual(self.pet._screen_name(), "HDMI-A-1")
+        self.assertAlmostEqual(self.pet._feet(), 1080, delta=1)
+        self.pet.windows_changed([])
+        self.at(2900)                                           # and back down again
+        self.play("leap")
+        self.assertEqual(self.pet._screen_name(), "eDP-1")
+        self.assertAlmostEqual(self.pet._feet(), 1530, delta=1)
+
+    def test_climb_to_the_other_screen_from_up_on_a_window(self):
+        self.at(700, on=self.WA)
+        stood, frames, layers, ladder = self.play("climb")
+        self.assertEqual(self.pet._screen_name(), "HDMI-A-1")
+        self.assertTrue(ladder)
+
+    def test_visit_and_read_from_the_other_screen(self):
+        self.at(2900)
+        stood, frames, layers, ladder = self.play("visit")
+        self.assertIn("magnifier", layers)
+        self.at(2900)
+        stood, frames, layers, ladder = self.play("read")
+        self.assertTrue({"glasses", "page"} <= layers, layers)
+
+    def test_read_from_up_on_a_window(self):
+        self.at(700, on=self.WA)
+        stood, frames, layers, ladder = self.play("read")
+        self.assertTrue({"glasses", "page"} <= layers, layers)
+
+    def test_walking_off_a_high_window_he_floats(self):
+        self.at(700, on=self.WA)
+        wpx = self.pet.iw * self.pet.scale
+        self.pet.set_box_left(1100 - wpx / 2 + 2)              # his middle just past the end
+        layers = set()
+        for _ in range(int(20_000 / 16)):
+            self.pet.advance(16)
+            layers |= set(self.pet.layers)
+            if self.pet._feet() > 1500 and not self.pet.airborne:
+                break
+        self.assertTrue(self.floated(layers), layers)
+        self.assertAlmostEqual(self.pet._feet(), 1530, delta=1)
+
+    def test_a_throw_is_still_just_physics(self):
+        self.at(700, on=self.WA)
+        self.pet.drop(300, -200)
+        layers = set()
+        for _ in range(int(8000 / 16)):
+            self.pet.advance(16)
+            layers |= set(self.pet.layers)
+        self.assertFalse(self.floated(layers))
+
+    def test_hop_up_when_up_already_with_nowhere_higher(self):
+        self.pet.windows_changed([list(self.WA)])
+        self.at(700, on=self.WA)
+        self.pet.play("perch_window")
+        seen = set()
+        for _ in range(int(5000 / 16)):
+            self.pet.advance(16)
+            seen |= {q["kind"] for q in self.pet.particles}
+            if self.pet.action != "perch_window":
+                break
+        self.assertIn("question", seen)
+        self.assertEqual(self.pet._window_under()[3], "a")       # still up there
+
+    def test_jump_to_a_far_window_when_asked(self):
+        self.pet.windows_changed([list(self.WA), list(self.WB)])   # the only other one: over on HDMI
+        self.at(700, on=self.WA)
+        self.pet.play("window_jump")
+        highest = float("inf")
+        for _ in range(int(20_000 / 16)):
+            self.pet.advance(16)
+            highest = min(highest, self.pet.y + self.pet.home_px.y())
+            if self.pet.action != "window_jump":
+                break
+        self.assertEqual(self.pet._window_under()[3], "b")
+        self.assertGreaterEqual(highest, 0)                        # his head never off the top
+
+    def test_a_race_from_a_window_starts_on_the_floor(self):
+        self.at(700, on=self.WA)
+        self.pet.play("race")
+        raced = 0
+        for _ in range(int(60_000 / 16)):
+            self.pet.advance(16)
+            if self.pet.frame[1] == "race":
+                raced += 16
+                self.assertIsNone(self.pet._window_under())
+                self.assertFalse(self.pet.chute)
+            if self.pet.action != "race":
+                break
+        self.assertGreater(raced, 2000)
+
+    def test_a_tall_ladder_is_climbed_briskly(self):
+        self.pet.windows_changed([list(self.WA)])
+        self.at(1400)
+        self.pet.play("perch_window")
+        climbing = 0
+        for _ in range(int(60_000 / 16)):
+            self.pet.advance(16)
+            if self.pet.frame[1] == "climb_ladder":
+                climbing += 16
+            if self.pet.action != "perch_window":
+                break
+        self.assertGreater(climbing, 3000)
+        self.assertLess(climbing, (cp.LADDER_TIME + 0.5) * 1000)
+
+    def test_with_nothing_to_do_it_with_he_looks_puzzled(self):
+        self.pet.windows_changed([])
+        self.at(1400)
+        self.pet.play("hop_down")
+        seen = set()
+        for _ in range(int(5000 / 16)):
+            self.pet.advance(16)
+            seen |= {q["kind"] for q in self.pet.particles}
+            if self.pet.action != "hop_down":
+                break
+        self.assertIn("question", seen)
+        self.assertNotEqual(self.pet.action, "hop_down")
 
 
 class ClaudeHooks(unittest.TestCase):

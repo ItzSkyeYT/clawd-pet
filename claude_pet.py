@@ -16,6 +16,7 @@ Right-click: menu    Drag: pick him up and throw him    Stroke him: he likes it
 import ast
 import calendar
 import collections
+import contextlib
 import datetime
 import json
 import math
@@ -81,6 +82,7 @@ CLOUD_RISE = 28              # riding the cloud up to a desktop icon
 CLOUD_LIFT = 7               # sprite pixels he sits up in his cloud (as in Clawd-Cloud)
 RACE_SPEED = 45
 CLIMB_SPEED = 14
+LADDER_TIME = 8.0             # s: the longest a ladder climb takes (a tall one goes quicker)
 GRAVITY = 700
 
 # What he does on his own, and how often.
@@ -307,7 +309,7 @@ AWAY = 10 * 60_000            # no pointer movement or prompt for this long: you
 PRESENT = 90_000              # reminders only come while you've done something this recently
 REMIND_LOUD = 120_000         # a reminder's first two minutes are loud; then he just holds it up
 REMINDERS = ("remind_water", "remind_break")
-NEVER_GRAB = REMINDERS + ("settings", "grab", "duck", "attention", "held", "fall")
+NEVER_GRAB = REMINDERS + ("settings", "grab", "duck", "attention", "held", "fall", "come_down")
 REMINDER_BITS = {"water_bubble", "break_bubble", "done_button", "done_button_pressed"}
 BUBBLE_AT = (23, -16)         # a reminder's bubble: over his right shoulder, clear of hats and bottles
 DONE_AT = (28, -1)            # its Done button: under the bubble, clear of the bottle at his side
@@ -2296,7 +2298,7 @@ class ClawdPet(QWidget):
             self.standing_on = sup[3] if sup and abs(sup[0] - self._feet()) < 2 else None
             ground = self.ground_y()
             if self.y < ground - 1:
-                self.drop((self._skid or self.vx) * 0.6)   # walked (or skidded) off an edge
+                self._stepped_off((self._skid or self.vx) * 0.6)   # walked (or skidded) off an edge
                 self._skid = 0.0
             elif self.y > ground:
                 self.y = ground                  # screens changed under him
@@ -2431,7 +2433,7 @@ class ClawdPet(QWidget):
         """Switch to what Claude Code needs now, unless he's doing something you
         asked for or is in the middle of something physical; either way _next()
         catches up the moment he's done."""
-        if self.manual or self.dragging or self.airborne or self.action in ("held", "fall", "duck", "grab"):
+        if self.manual or self.dragging or self.airborne or self.action in ("held", "fall", "come_down", "duck", "grab"):
             return
         # Anything else he's doing is his own idea, so Claude Code comes first,
         # even halfway up a ladder: the props vanish and he drops to the floor.
@@ -2992,6 +2994,10 @@ class ClawdPet(QWidget):
         x1 = box_left - self.home_px.x()
         y1 = floor - self.home_px.y() - self.ih * s
         apex = min(y0, y1) - peak
+        tops = [a.top() for a in screen_areas() for x in (self.box_span()[0], box_left)
+                if a.left() <= x < a.left() + a.width()]
+        if tops:                                  # a big leap still keeps his head on the screen
+            apex = min(min(y0, y1), max(apex, min(tops) - self.home_px.y() + 2 * s))
         t_up = (2 * (y0 - apex) / g) ** 0.5
         t_down = (2 * (y1 - apex) / g) ** 0.5
         total = t_up + t_down
@@ -3011,15 +3017,23 @@ class ClawdPet(QWidget):
         self.scripted = hold
 
     def _act_leap(self):
-        """Jump up onto the higher screen next to this one."""
-        seam = self._seam("up")
+        """Jump over onto the next screen: up onto a taller one, or out and
+        down onto a shorter one."""
+        yield from self._get_down()
+        near = None if self.manual else 300
+        up = self._seam("up", near=near)
+        seam = up or self._seam("down", near=near)
         if seam is None:
+            yield from self._shrug()
             return
         x, _, other = seam
         s = self.scale
         width = self.iw * s
         side = 1 if other.left() >= x else -1
-        yield from self._walk_to(x - width - 3 * s if side > 0 else x + 3 * s)
+        if up:
+            yield from self._walk_to(x - width - 3 * s if side > 0 else x + 3 * s)
+        else:                                               # to the very edge, toes over
+            yield from self._walk_to(x - width + 2 * s if side > 0 else x - 2 * s)
         self.pose("idle")
         yield 200
         land = random.uniform(10, 40) * s
@@ -3034,12 +3048,14 @@ class ClawdPet(QWidget):
         """Pull out a ladder and climb to the neighbouring screen, up or down
         (the nearer one, or the one on `side`). Whatever he's holding is put
         away for the climb and back in his hand at the top."""
+        yield from self._get_down()
         left = self.box_span()[0]
         options = [(abs(seam[0] - left), seam, up)
                    for seam, up in ((self._seam("up", near=None, side=side), True),
                                     (self._seam("down", near=None, side=side), False))
                    if seam is not None]
         if not options:
+            yield from self._shrug()
             return
         _, (seam, here, other), up = min(options, key=lambda o: o[0])
         s = self.scale
@@ -3112,13 +3128,16 @@ class ClawdPet(QWidget):
         i = 0
         name = "climb_ladder" if "climb_ladder" in self.sp.anims else "climb"
         steps = len(self.sp.anims[name].frames)
+        # a tall ladder takes no more than LADDER_TIME: he climbs faster, his hands quicker
+        speed = max(CLIMB_SPEED * s, abs(target - self.y) / LADDER_TIME)
+        per_step = max(4, round(8 * CLIMB_SPEED * s / speed))
         while (target - self.y) * direction > 0.5:
             # climbing down, the cycle runs backwards
             self.show_frame(name, i % steps if direction < 0 else (-i - 1) % steps)
             i += 1
-            for _ in range(8):                   # about 130 ms per hand-over-hand step
+            for _ in range(per_step):            # about 130 ms per hand-over-hand step
                 yield TICK_MS
-                self.y += direction * CLIMB_SPEED * s * TICK_MS / 1000
+                self.y += direction * speed * TICK_MS / 1000
                 if (target - self.y) * direction <= 0:
                     break
         self.y = target
@@ -3148,9 +3167,11 @@ class ClawdPet(QWidget):
         yield from self._play(name, range(c, d + 1), mirror)          # hop off
 
     def _act_cloud(self):
+        yield from self._get_down()                 # rides need a floor, not a window top
         yield from self._ride("cloud", CLOUD_SPEED)
 
     def _act_race(self):
+        yield from self._get_down()
         yield from self._ride("race", RACE_SPEED)
 
     def _act_laptop(self, until_idle=False, duration=None):
@@ -3411,6 +3432,7 @@ class ClawdPet(QWidget):
 
     def _act_lurk(self):
         """Walk off the nearer edge, peek back in, then come back."""
+        yield from self._get_down()
         geo = self.screen_geometry()
         room_l, room_r = self._room()
         width = self.iw * self.scale
@@ -4049,7 +4071,7 @@ class ClawdPet(QWidget):
         """Break into whatever he's doing on his own (or for Claude Code) for a
         reminder: a new one that's due, or one still waiting for its Done button."""
         if (self.manual or self.dragging or self.airborne or self.claude_mode() == "attention"
-                or self.action in REMINDERS + ("held", "fall", "duck", "attention", "grab")):
+                or self.action in REMINDERS + ("held", "fall", "come_down", "duck", "attention", "grab")):
             return
         if self.reminding:
             self.start("remind_" + self.reminding)
@@ -4161,26 +4183,7 @@ class ClawdPet(QWidget):
         s, wpx = self.scale, self.iw * self.scale
         target = area.left() + area.width() / 2 - wpx / 2
         floor = area.top() + area.height()
-        if self._window_under() is not None:                  # up on a window: hop down first
-            here = self.screen_geometry()
-            self.show_frame("jump", 1)
-            yield 160
-            self.show_frame("jump", 2)
-            yield from self._arc_to(target if here == area else self.box_span()[0],
-                                    here.top() + here.height(), 8 * s)
-            yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
-        for _ in range(len(screen_areas())):                  # a screen at a time
-            here = self.screen_geometry()
-            if here == area or abs(self._feet() - (here.top() + here.height())) > 2:
-                break
-            toward = 1 if area.center().x() > here.center().x() else -1
-            if self._seam("up", near=None, side=toward) or self._seam("down", near=None, side=toward):
-                yield from self._act_climb(side=toward)
-            else:                                             # the floors meet: walk on over
-                yield from self._walk_to(here.left() + here.width() + 2 * s if toward > 0
-                                         else here.left() - wpx - 2 * s)
-            if self.screen_geometry() == here:                # couldn't get across
-                break
+        yield from self._travel_to(area)
         if self.screen_geometry() == area and abs(self._feet() - floor) < 2:
             if abs(target - self.box_span()[0]) > 30 * s:
                 yield from self._walk_to(target)
@@ -4191,6 +4194,188 @@ class ClawdPet(QWidget):
             yield from self._arc_to(target, floor, 30 * s)
             yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
         self.pose("idle")
+
+    # ── Getting there: what a scene needs before it can start ──────
+
+    @contextlib.contextmanager
+    def _as_if_at(self, box_left, feet):
+        """Work something out as if he stood elsewhere (his feet at `feet`)."""
+        was = self.x, self.y, self.standing_on
+        self.set_box_left(box_left)
+        self.y = feet - self.home_px.y() - self.ih * self.scale
+        self.standing_on = None
+        try:
+            yield
+        finally:
+            self.x, self.y, self.standing_on = was
+
+    def _screen_with(self, test):
+        """The nearest screen where test() holds with him on its floor, or None."""
+        cx, wpx = sum(self.box_span()) / 2, self.iw * self.scale
+        for a in sorted(screen_areas(), key=lambda a: abs(a.center().x() - cx)):
+            with self._as_if_at(a.left() + a.width() / 2 - wpx / 2, a.top() + a.height()):
+                if test():
+                    return a
+        return None
+
+    def _get_down(self):
+        """Off the window he's on (and any he lands on below it) to a floor."""
+        for _ in range(4):
+            if self._window_under() is None:
+                return
+            yield from self._act_hop_down()
+
+    def _travel_to(self, area):
+        """Over to another screen's floor the way he gets about: off a window,
+        then screen by screen, up or down the ladder where the floors step and
+        walking where they meet. True if he got there."""
+        yield from self._get_down()
+        s, wpx = self.scale, self.iw * self.scale
+        for _ in range(len(screen_areas())):
+            here = self.screen_geometry()
+            if here == area:
+                break
+            if abs(self._feet() - (here.top() + here.height())) > 2:
+                break
+            toward = 1 if area.center().x() > here.center().x() else -1
+            if self._seam("up", near=None, side=toward) or self._seam("down", near=None, side=toward):
+                yield from self._act_climb(side=toward)
+            else:                                             # the floors meet: walk on over
+                yield from self._walk_to(here.left() + here.width() + 2 * s if toward > 0
+                                         else here.left() - wpx - 2 * s)
+            if self.screen_geometry() == here:                # couldn't get across
+                break
+        return self.screen_geometry() == area
+
+    def _to_a_screen_with(self, things):
+        """Down to a floor and, if there are none of `things` on this screen
+        (icons, folders), over to the nearest screen that has some."""
+        yield from self._get_down()
+        if things():
+            return True
+        area = self._screen_with(things)
+        if area is None or not (yield from self._travel_to(area)):
+            yield from self._shrug()
+            return False
+        return bool(things())
+
+    def _ladder_target(self, wid=None):
+        """A window (that one, or the nearest) he could lean a ladder against
+        from the floor he's on, to climb up to its top: (window id, side: -1
+        its left edge, ladder x, his box left on the ladder)."""
+        s, wpx, lw = self.scale, self.iw * self.scale, LADDER_W * self.scale
+        feet = self._feet()
+        left, right = self.box_span()
+        room_l, room_r = self._room()
+        lo, hi = left - room_l, right + room_r
+        margin = s + (wpx - lw) / 2                    # Clawd on it, just clear of the window
+        tops = [sf for sf in self._surfaces() if sf[3] is not None]
+        best = None
+        for win in self.window_list:
+            if win["fs"] or (wid is not None and win["id"] != wid) or win["y"] > feet - self.ih * s:
+                continue
+            for side in (-1, 1):
+                edge = win["x"] if side < 0 else win["x"] + win["w"]
+                if not any(sf[0] == win["y"] and sf[3] == win["id"] and (sf[1] == edge if side < 0 else sf[2] == edge)
+                           and sf[2] - sf[1] >= wpx for sf in tops):
+                    continue                                    # nowhere to stand at the top
+                ladder_x = edge - margin - lw if side < 0 else edge + margin
+                box = ladder_x + lw / 2 - wpx / 2
+                if box < lo or box + wpx > hi or not self._column_clear(win, box, win["y"] - 5 * s, feet):
+                    continue
+                cost = abs(box - left)
+                if best is None or cost < best[0]:
+                    best = (cost, win["id"], side, ladder_x, box)
+        return best[1:] if best else None
+
+    def _ladder_up_to(self, target):
+        """Over to a window's side, lean a ladder on it, climb up and step onto
+        its top. Whatever he's holding is put away for the climb."""
+        wid, side, ladder_x, box = target
+        s, lw = self.scale, LADDER_W * self.scale
+        yield from self._walk_to(box)
+        self.set_box_left(box)
+        win = self._window(wid)
+        if win is None:
+            return
+        self.pose("look_r" if side < 0 else "look_l")      # sizing it up
+        yield 450
+        held, self.layers = self.layers, {}
+        floor = self._feet()
+        rect = QRect(int(ladder_x), int(win["y"] - 5 * s), lw, int(floor - win["y"] + 5 * s))
+        yield from self._ladder_out(rect, from_top=False)
+        yield from self._climb_to(win["y"])
+        win = self._window(wid)
+        if win is None:                                     # it went: back down again
+            yield from self._climb_to(floor)
+            self.scripted = False
+        else:
+            edge = win["x"] if side < 0 else win["x"] + win["w"]
+            inward = edge + 2 * s if side < 0 else edge - self.iw * s - 2 * s
+            self.show_frame("jump", 2)                      # and over onto the top
+            yield from self._arc_to(inward, win["y"], 3 * s)
+            yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
+        self.layers = held
+        self.pose("idle")
+        yield from self._ladder_in()
+
+    def _up_onto_window(self, wid=None):
+        """Up onto a window top (that one, or the nearest he can get onto): a
+        hop if it's in reach, hand over hand up its side if that comes down
+        near the floor, else up a ladder leaned against it; on another screen
+        if there's none on this one. True if he's up there."""
+        on = self._window_under()
+        if on is not None and wid in (None, on[3]):
+            return True
+        yield from self._get_down()
+        for attempt in range(2):
+            hop = self._window_target(wid)
+            climb = None if hop else self._climb_target(wid=wid)
+            ladder = None if hop or climb else self._ladder_target(wid)
+            if hop:
+                yield from self._hop_up(hop)
+            elif climb:
+                yield from self._act_climb_window(climb)
+            elif ladder:
+                yield from self._ladder_up_to(ladder)
+            elif attempt == 0:                             # none here: a screen that has one?
+                area = self._screen_with(lambda: self._ladder_target(wid) or self._window_target(wid)
+                                         or self._climb_target(wid=wid))
+                if area is None or area == self.screen_geometry() or not (yield from self._travel_to(area)):
+                    return False
+                continue
+            break
+        on = self._window_under()
+        return on is not None and wid in (None, on[3])
+
+    def _window_with_a_jump(self):
+        """The nearest window top (on this screen) with another to jump to from it."""
+        s, wpx = self.scale, self.iw * self.scale
+        cx = sum(self.box_span()) / 2
+        best = None
+        for y, x0, x1, wid in self._surfaces():
+            if wid is None or x1 - x0 < wpx + 4 * s:
+                continue
+            for box in (x0 + 2 * s, x1 - wpx - 2 * s):
+                with self._as_if_at(box, y):
+                    ok = self._jump_target() is not None
+                d = abs(box + wpx / 2 - cx)
+                if ok and (best is None or d < best[0]):
+                    best = (d, wid)
+        return best[1] if best else None
+
+    def _shrug(self):
+        """Asked for something there's nothing here to do it with (no window,
+        no icon, no other screen): a look round, puzzled. Only when you asked."""
+        if not self.manual:
+            return
+        self.pose("look_l")
+        yield 450
+        self.pose("look_r")
+        yield 450
+        self._emit("question", self.iw, -8, vy=-1.5, life=1400)
+        self.pose("idle")
+        yield 1000
 
     def _act_remind_water(self):
         """Water time. For the first couple of minutes as loud as he gets: he
@@ -4296,28 +4481,37 @@ class ClawdPet(QWidget):
             return self.iw - 2 + random.random(), -2.0
         return self.iw - 6 + random.random() * 2, -1.0
 
-    def _window_target(self):
-        """A window top he could hop up onto: visible, above him, not too far."""
+    def _window_target(self, wid=None):
+        """A window top he could hop up onto (that one, or any): visible, above
+        him, not too far. (cost, its top, box middle there, window id)"""
         s = self.scale
         feet = self._feet()
         left, right = self.box_span()
         cx = (left + right) / 2
         best = None
-        for y, x0, x1, wid in self._surfaces():
-            if wid is None or not (feet - 9 * self.ih * s <= y <= feet - self.ih * s):
+        for y, x0, x1, w in self._surfaces():
+            if w is None or (wid is not None and w != wid) or not (feet - 9 * self.ih * s <= y <= feet - self.ih * s):
                 continue
             spot = min(max(cx, x0 + self.iw * s * 0.6), x1 - self.iw * s * 0.6)
             cost = abs(spot - cx) + (feet - y) / 2
             if abs(spot - cx) <= 500 and (best is None or cost < best[0]):
-                best = (cost, y, spot)
+                best = (cost, y, spot, w)
         return best
 
     def _act_perch_window(self):
+        """Up onto a window top: a hop if one's in reach, else up its side or a
+        ladder. Up on one already, over to another."""
+        if self._window_under() is not None:
+            if self._jump_target(None) is not None:
+                yield from self._act_window_jump()
+            else:
+                yield from self._shrug()                    # up here already, and nowhere higher
+        elif not (yield from self._up_onto_window()):
+            yield from self._shrug()
+
+    def _hop_up(self, target):
         """Walk under a window and jump up onto its top edge."""
-        target = self._window_target()
-        if target is None:
-            return
-        _, top, spot = target
+        _, top, spot, _ = target
         s = self.scale
         box_left = spot - self.iw * s / 2
         yield from self._walk_to(box_left)
@@ -4344,10 +4538,11 @@ class ClawdPet(QWidget):
                     return False
         return True
 
-    def _climb_target(self):
+    def _climb_target(self, reach=CLIMB_JUMP, wid=None):
         """A window he can climb up the side of from where he stands: its side
-        comes down to near his feet, it's in view, and there's room to stand
-        up top at that end. (window id, side: -1 its left edge, box left)."""
+        comes down to within `reach` cells of his feet (None: he'll leap for
+        it), it's in view, and there's room to stand up top at that end.
+        (window id, side: -1 its left edge, box left)."""
         s, wpx = self.scale, self.iw * self.scale
         feet = self._feet()
         left, right = self.box_span()
@@ -4358,7 +4553,7 @@ class ClawdPet(QWidget):
         for win in self.window_list:
             top, bottom = win["y"], win["y"] + win["h"]
             if (win["fs"] or win["id"] == self.standing_on or top > feet - 2 * self.ih * s
-                    or bottom < feet - CLIMB_JUMP * s):
+                    or (reach is not None and bottom < feet - reach * s) or (wid is not None and win["id"] != wid)):
                 continue
             for side in (-1, 1):
                 edge = win["x"] if side < 0 else win["x"] + win["w"]
@@ -4405,9 +4600,10 @@ class ClawdPet(QWidget):
         ys = [y for y, x0, x1, _ in self._surfaces() if x0 <= cx < x1 and y > feet + 2]
         return min(ys) if ys else None
 
-    def _jump_target(self):
+    def _jump_target(self, far=1):
         """Another window top he can jump to from where he stands (a window top
-        or the floor): above, below or beside, in view, not too far. The
+        or the floor): above, below or beside, in view, not too far (`far`
+        times the usual reach; None: any distance, a cartoon leap). The
         nearest spot on the nearest one: (landing box left, its top, its id)."""
         s, wpx = self.scale, self.iw * self.scale
         on = self._window_under()
@@ -4422,12 +4618,12 @@ class ClawdPet(QWidget):
             if wid is None or wid == on[3] or b - a < wpx + 4 * s:
                 continue
             rise = feet - y
-            if rise > LEAP_UP * s or -rise > LEAP_DOWN * s or abs(rise) < 2 * s:
+            if abs(rise) < 2 * s or (far is not None and (rise > LEAP_UP * far * s or -rise > LEAP_DOWN * far * s)):
                 continue
             land = min(max(left, a + 2 * s), b - wpx - 2 * s)   # the nearest spot on it
             takeoff = min(max(land, lo), hi)
             across = abs(land - takeoff)
-            if across > LEAP_GAP * s or area_at(land + wpx / 2, y - 1) is None:
+            if (far is not None and across > LEAP_GAP * far * s) or area_at(land + wpx / 2, y - 1) is None:
                 continue
             cost = across + abs(rise) / 2 + abs(takeoff - left) / 4
             if best is None or cost < best[0]:
@@ -4438,11 +4634,19 @@ class ClawdPet(QWidget):
         """A crouch and a leap onto another window top: across a gap, up onto
         one standing higher, or down onto one lower down. If it's a long way
         across he walks nearer first."""
-        if self._window_under() is None:                     # from the floor: up onto one
-            yield from self._act_perch_window()
-            return
-        target = self._jump_target()
-        if target is None:
+        came_up = self._window_under() is None
+        if came_up:                                         # from the floor: up onto one to jump from
+            if not (yield from self._up_onto_window(self._window_with_a_jump())):
+                yield from self._shrug()
+                return
+        far = 1
+        target = self._jump_target(far)
+        if target is None and self.manual:                  # asked for: a longer leap, however long
+            far = 3 if self._jump_target(3) is not None else None
+            target = self._jump_target(far)
+        if target is None:                                  # nowhere to go on to: getting up was the jump,
+            if self.manual and not came_up:                 # or, up there already, down he goes
+                yield from self._act_hop_down()
             return
         land, top, wid = target
         s, wpx = self.scale, self.iw * self.scale
@@ -4451,7 +4655,7 @@ class ClawdPet(QWidget):
         near = min(max(land, left - room_l), left + room_r)   # as near as what he's on goes
         if abs(near - left) > 4 * s:
             yield from self._walk_to(near)
-            target = self._jump_target() or target
+            target = self._jump_target(far) or target
             land, top, wid = target
         self.pose("look_r" if land > self.box_span()[0] else "look_l")   # eyeing it up
         yield 600
@@ -4464,11 +4668,20 @@ class ClawdPet(QWidget):
         self.pose("happy")
         yield 500
 
-    def _act_climb_window(self):
+    def _act_climb_window(self, target=None):
         """Walk to the side of a window and climb it, hand over hand up its
-        edge, then pull himself up onto the top."""
-        target = self._climb_target()
+        edge, then pull himself up onto the top. Asked for, he'll leap for a
+        side that starts high up, or go to the screen that has one."""
+        target = target or self._climb_target()
+        if target is None and self.manual:
+            yield from self._get_down()
+            target = self._climb_target(reach=None)
+            if target is None:
+                area = self._screen_with(lambda: self._climb_target(reach=None))
+                if area is not None and area != self.screen_geometry() and (yield from self._travel_to(area)):
+                    target = self._climb_target(reach=None)
         if target is None:
+            yield from self._shrug()
             return
         wid, side, box = target
         yield from self._walk_to(box)
@@ -4486,9 +4699,16 @@ class ClawdPet(QWidget):
             yield 140
             self.show_frame("jump", 2)
             rise = self._feet() - bottom + self.ih * s / 2
-            for k in range(1, 9):
-                self.y -= rise / 8
-                yield TICK_MS
+            if rise <= 1.5 * CLIMB_JUMP * s:
+                for k in range(1, 9):
+                    self.y -= rise / 8
+                    yield TICK_MS
+            else:                                           # a proper leap up to it
+                yield from self._arc_to(box, bottom - self.ih * s / 2, 3 * s, hold=True)
+            win = self._window(wid)
+            if win is None:
+                yield from self._come_down()
+                return
         done = yield from self._climb_side(wid, side, up=True)
         if not done:
             return
@@ -4504,9 +4724,15 @@ class ClawdPet(QWidget):
     def _act_climb_down(self):
         """Down the side of the window he's on: along to its end, over the edge,
         and hand over hand down its side, dropping off the bottom if it stops
-        short of the floor."""
+        short of the floor. Asked for from the floor, he gets up there first."""
+        if self._window_under() is None:
+            if not self.manual or not (yield from self._up_onto_window()):
+                yield from self._shrug()
+                return
         target = self._climb_down_target()
         if target is None:
+            if self.manual:
+                yield from self._act_hop_down()             # no side to climb down: hop off
             return
         side, box = target
         wid = self.standing_on or self._window_under()[3]
@@ -4529,9 +4755,7 @@ class ClawdPet(QWidget):
         while True:
             win = self._window(wid)
             if win is None:                                 # gone: nothing to hold on to
-                self.scripted = False
-                self.airborne = True
-                yield from self._fall()
+                yield from self._come_down()
                 return False
             if (win["x"], win["y"]) != last:                # moved: along with it
                 self.x += win["x"] - last[0]
@@ -4544,8 +4768,7 @@ class ClawdPet(QWidget):
                            or feet - self.ih * s / 2 >= win["y"] + win["h"]):
                 self.scripted = False                       # down (or off the bottom: drop the rest)
                 if self.y < self.ground_y() - 1:
-                    self.airborne = True
-                    yield from self._fall()
+                    yield from self._come_down()
                 else:
                     self.y = self.ground_y()
                     self.pose("idle")
@@ -4563,10 +4786,16 @@ class ClawdPet(QWidget):
             yield TICK_MS
 
     def _act_hop_down(self):
-        """Walk to whichever end of the window he's on is nearer, and hop off it."""
+        """Walk to whichever end of the window he's on is nearer, and hop off it
+        (floating down, from high up). Asked for from the floor, he gets up
+        onto one first."""
+        if self._window_under() is None:
+            if not self.manual or not (yield from self._up_onto_window()):
+                yield from self._shrug()
+                return
+            self.pose("look_l" if random.random() < 0.5 else "look_r")   # a look down first
+            yield 500
         on = self._window_under()
-        if on is None:
-            return
         s = self.scale
         room_l, room_r = self._room()
         side = -1 if room_l < room_r else 1
@@ -4588,13 +4817,13 @@ class ClawdPet(QWidget):
         return (min(ys) - feet) if ys else 0.0
 
     def _come_down(self, vx=0.0, vy=0.0):
-        """Down from up here: a plain drop if it isn't far (or now and then
-        anyway); from higher, floating down under an umbrella; from really
-        high, maybe a skydive first and then the parachute."""
+        """Down from up here: a plain drop if it isn't far; from higher,
+        floating down under an umbrella; from really high, maybe a skydive
+        first and then the parachute."""
         s = self.scale
         self.scripted = False
         drop = self._drop_below(vx)
-        if drop < FLOAT_FROM * s or "umbrella" not in self.sp.props or random.random() < 0.25:
+        if drop < FLOAT_FROM * s or "umbrella" not in self.sp.props:
             self.airborne, self.vx, self.vy = True, vx, vy
             yield from self._fall()
             return
@@ -4697,9 +4926,9 @@ class ClawdPet(QWidget):
         """Float up beside a desktop icon and check it out properly: puzzle over
         it, lean in, poke it, go over it with a magnifying glass, make up his
         mind. Then sometimes hop onto it (or hang off it), else drop down."""
-        icons = self._icons_here()
-        if not icons:
+        if not (yield from self._to_a_screen_with(self._icons_here)):
             return
+        icons = self._icons_here()
         _, icon = random.choice(icons)
         s = self.scale
         width = self.iw * s
@@ -4869,9 +5098,9 @@ class ClawdPet(QWidget):
         """Float up on the cloud under a desktop folder, rummage in it, pull out
         a page, put on reading glasses and read it like a story (with all the
         feelings), then put everything back and hop off."""
-        folders = self._folders_here()
-        if not folders:
+        if not (yield from self._to_a_screen_with(self._folders_here)):
             return
+        folders = self._folders_here()
         _, icon = random.choice(folders)
         s = self.scale
         geo = self.screen_geometry()
@@ -5021,6 +5250,19 @@ class ClawdPet(QWidget):
         self.vx, self.vy = vx, vy
         self.airborne = True
         self.start("fall")
+
+    def _stepped_off(self, vx):
+        """Off an edge on his own (walked or skidded off, or the window went
+        from under him): from high up he floats down, otherwise he drops.
+        A throw is yours, so that stays a plain fall (drop())."""
+        if self._drop_below(vx) >= FLOAT_FROM * self.scale and "umbrella" in self.sp.props:
+            self.airborne, self.vx, self.vy = True, vx, 0.0
+            self.start("come_down", vx=vx)
+        else:
+            self.drop(vx)
+
+    def _act_come_down(self, vx=0.0, vy=0.0):
+        yield from self._come_down(vx, vy)
 
     def mousePressEvent(self, e):
         self.wake()
