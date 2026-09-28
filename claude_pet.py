@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import webbrowser
 
 # A desktop pet is a window that moves itself, which Wayland doesn't allow,
@@ -38,7 +39,8 @@ if (sys.platform.startswith("linux") and os.environ.get("WAYLAND_DISPLAY")
 
 from PyQt6.QtCore import (QElapsedTimer, QObject, QPoint, QRect, QSettings, Qt, QTimer,
                           pyqtClassInfo, pyqtSlot)
-from PyQt6.QtGui import QActionGroup, QBitmap, QCursor, QIcon, QImage, QPainter, QPixmap, QRegion
+from PyQt6.QtGui import (QActionGroup, QBitmap, QCursor, QGuiApplication, QIcon, QImage, QPainter,
+                         QPixmap, QRegion)
 from PyQt6.QtNetwork import QLocalServer
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
 
@@ -156,7 +158,9 @@ LADDER_W = 10
 LADDER_PALETTE = {"d": RAIL_DARK, "l": RAIL_LIGHT}
 
 CURSOR_NEAR = 70              # sprite pixels: how close the pointer must be for him to watch it
-GLANCE_MS = 1400              # a look up from the laptop at a nearby pointer lasts this long
+GLANCE_MS = 1400
+ARMS_UP = ("anim", "jump", 2, False)   # a folder is being dragged over him: "for me?"
+DRAG_FORGET = 10_000                   # ms without drag events before he stops waiting              # a look up from the laptop at a nearby pointer lasts this long
 GLANCE_COOLDOWN = 6000        # ...and won't happen again for this long (just a moment each time)
 TYPING_EYES = ((12, 12), (20, 12))    # the eyes in Clawd-Laptop's typing frames (3/4 view)
 REST = (8000, 20000)          # idle time between the things he does on his own
@@ -615,6 +619,28 @@ def set_autostart(on, entry=AUTOSTART, launcher=LAUNCHER, icon_dir=DATA_DIR):
             f.write(desktop_entry(icon, autostart=auto))
 
 
+def claude_link_for_folder(folder):
+    return CLAUDE_LINKS["new"] + "?folder=" + urllib.parse.quote(folder, safe="")
+
+
+def open_claude_code_in(folder):
+    """A new Claude Code session in `folder`: the app's Code tab, or a terminal there."""
+    if claude_app_installed():
+        cmd = open_url_command(claude_link_for_folder(folder))
+        if sys.platform == "win32":
+            subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        else:
+            spawn(cmd)
+        return True
+    claude = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
+    cmd = terminal_command([claude])
+    if cmd is None:
+        return False
+    subprocess.Popen(cmd, cwd=folder, env=launch_env(), start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
 def open_claude_web():
     if sys.platform.startswith("linux") and shutil.which("xdg-open"):
         spawn(["xdg-open", "https://claude.ai"])
@@ -659,12 +685,22 @@ function sendWindows() {{
     callDBus(SERVICE, "/Pet", SERVICE, "Windows", JSON.stringify(out));
 }}
 function watch(w) {{
+    if (String(w.resourceClass) === "clawd-pet") return;             // he moves every frame
     w.frameGeometryChanged.connect(sendWindows);
     w.fullScreenChanged.connect(sendWindows);
     w.minimizedChanged.connect(sendWindows);
 }}
-for (const w of workspace.windowList()) watch(w);
-workspace.windowAdded.connect(function (w) {{ watch(w); sendWindows(); }});
+function tuck(w) {{
+    // his drop target is a managed window (the only kind KWin hands drags to):
+    // keep it off the taskbar, the pager and Alt+Tab
+    if (String(w.resourceClass) === "clawd-pet" && w.notification) {{
+        w.skipTaskbar = true;
+        w.skipPager = true;
+        w.skipSwitcher = true;
+    }}
+}}
+for (const w of workspace.windowList()) {{ tuck(w); watch(w); }}
+workspace.windowAdded.connect(function (w) {{ tuck(w); watch(w); sendWindows(); }});
 workspace.windowRemoved.connect(sendWindows);
 workspace.windowActivated.connect(sendWindows);
 workspace.currentDesktopChanged.connect(sendWindows);
@@ -937,6 +973,54 @@ class Prop(QWidget):
         p.end()
 
 
+def set_window_type(widget, kind):
+    """Give an X11 window an EWMH type Qt has no flag for. Only works before
+    the window is first shown: the window manager reads it when it maps."""
+    if QGuiApplication.platformName() != "xcb" or not shutil.which("xprop"):
+        return False
+    try:
+        subprocess.run(["xprop", "-id", str(int(widget.winId())), "-f", "_NET_WM_WINDOW_TYPE", "32a",
+                        "-set", "_NET_WM_WINDOW_TYPE", kind], timeout=2, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+class DropCatcher(QWidget):
+    """An invisible twin under Clawd that takes drops for him.
+
+    KWin only hands drags from Wayland apps (Dolphin, the desktop) to X11
+    windows it manages, and Clawd is unmanaged. This one is managed, typed as a
+    notification so KWin neither pushes it into the work area nor stacks it
+    under ordinary windows, and shaped like him. He sits on top of it, so the
+    pointer only ever reaches it mid-drag."""
+
+    def __init__(self, pet):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint
+                         | Qt.WindowType.Tool
+                         | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAcceptDrops(True)
+        self.setWindowTitle("Clawd drop target")
+        self.pet = pet
+        self.typed = set_window_type(self, "_NET_WM_WINDOW_TYPE_NOTIFICATION")
+
+    def dragEnterEvent(self, e):
+        self.pet.dragEnterEvent(e)
+
+    def dragMoveEvent(self, e):
+        self.pet.dragMoveEvent(e)
+
+    def dragLeaveEvent(self, e):
+        self.pet.dragLeaveEvent(e)
+
+    def dropEvent(self, e):
+        self.pet.dropEvent(e)
+
+
 # ── The pet ─────────────────────────────────────────────────────────
 
 class ClawdPet(QWidget):
@@ -962,6 +1046,12 @@ class ClawdPet(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setMouseTracking(True)            # hovering over him counts as the pointer being near
+        self.setAcceptDrops(True)              # drop a folder on him: a Claude Code session there
+        self.catcher = None                    # his DropCatcher, on KDE Wayland
+        self._drag_over = False
+        self._drag_seen = 0.0
+        self._before_drag = None
+        self._catcher_want, self._catcher_at = None, -1e9
         self.setWindowTitle("Clawd")
 
         scale = DEFAULT_SCALE
@@ -1370,11 +1460,15 @@ class ClawdPet(QWidget):
     def advance(self, dt):
         """Move the simulation on by dt milliseconds."""
         self.now += dt
-        if not (self.dragging or self.scripted):
+        if self._drag_over and self.now - self._drag_seen > DRAG_FORGET:
+            self._drag_over = False              # the drag went away without a leave event
+        waiting = self._drag_over                # something's being dragged over him: hold still
+        if not (self.dragging or self.scripted or waiting):
             self._physics(dt)
-        self.wait -= dt
+        if not waiting:
+            self.wait -= dt
         for _ in range(100):                     # a script can take several steps at once
-            if self.wait > 0:
+            if self.wait > 0 or waiting:
                 break
             try:
                 self.wait += next(self.script)
@@ -1385,12 +1479,37 @@ class ClawdPet(QWidget):
             p = QCursor.pos()
             if self.cursor is None or (p.x(), p.y()) != self.cursor[:2]:
                 self.cursor_moved(p.x(), p.y())
-        self._petting(dt)
-        self._watch_cursor()
+        if waiting:
+            self.frame = ARMS_UP                 # "for me?"
+        else:
+            self._petting(dt)
+            self._watch_cursor()
         self._age_particles(dt)
         if (int(self.x), int(self.y)) != (self.pos().x(), self.pos().y()):
             self.move(int(self.x), int(self.y))
         self._refresh()
+        self._sync_catcher()
+
+    def _sync_catcher(self):
+        """Keep the drop target exactly under him: same place, size, shape and visibility."""
+        c = self.catcher
+        if c is None:
+            return
+        if not self.isVisible() or self._mask is None:
+            if c.isVisible():
+                c.hide()
+            return
+        mask = self._mask
+        if self._drag_over and not c.mask().isEmpty():
+            mask = mask.united(c.mask())         # only grow mid-drag: a shrinking target would flicker
+        if c.mask() != mask:
+            c.setMask(mask)
+        want = self.geometry()
+        if c.geometry() != want and (want != self._catcher_want or self.now - self._catcher_at > 1000):
+            c.setGeometry(want)
+            self._catcher_want, self._catcher_at = want, self.now
+        if not c.isVisible():
+            c.show()
 
     def _physics(self, dt):
         sec = dt / 1000
@@ -1491,7 +1610,11 @@ class ClawdPet(QWidget):
                 "mode": self.claude_mode(), "cursor": list(self.cursor) if self.cursor else None,
                 "ladder": self.ladder.isVisible(), "scale": self.scale,
                 "windows": len(self.window_list), "standing_on": self.standing_on, "ducked": self.ducked,
-                "ledges": sum(1 for sf in self._surfaces() if sf[3] is not None)}
+                "ledges": sum(1 for sf in self._surfaces() if sf[3] is not None),
+                "catcher": None if self.catcher is None else
+                [self.catcher.x(), self.catcher.y(), self.catcher.width(), self.catcher.height(),
+                 self.catcher.isVisible()],
+                "at": [self.pos().x(), self.pos().y(), self.width(), self.height()]}
 
     def claude_event(self, msg):
         self.last_message = msg
@@ -2753,6 +2876,62 @@ class ClawdPet(QWidget):
         cmd = restart_command()
         os.execve(cmd[0], cmd, env_for_restart())
 
+    # ── Drag and drop ─────────────────────────────────────────────
+
+    @staticmethod
+    def _dropped_folder(mime):
+        if mime is None or not mime.hasUrls():
+            return None
+        for url in mime.urls():
+            if url.isLocalFile():
+                path = url.toLocalFile().rstrip("/") or "/"
+                return path if os.path.isdir(path) else os.path.dirname(path)
+        return None
+
+    @staticmethod
+    def _take(e):
+        """Accept a drag as a copy (or a link), never a move: the folder stays where it is."""
+        for action in (Qt.DropAction.CopyAction, Qt.DropAction.LinkAction):
+            if e.possibleActions() & action:
+                e.setDropAction(action)
+                e.accept()
+                return True
+        e.ignore()
+        return False
+
+    def dragEnterEvent(self, e):
+        if self._dropped_folder(e.mimeData()) is None or not self._take(e):
+            e.ignore()
+            return
+        self._drag_seen = self.now
+        if not self._drag_over:
+            self._drag_over = True
+            self._before_drag = self.frame
+            self._emit("excl", 11, -8, vy=-2, life=1000)
+
+    def dragMoveEvent(self, e):
+        if self._drag_over and self._take(e):
+            self._drag_seen = self.now
+        else:
+            e.ignore()
+
+    def dragLeaveEvent(self, _e):
+        if self._drag_over and self._before_drag is not None:
+            self.frame = self._before_drag       # carry on as he was
+        self._drag_over = False
+
+    def dropEvent(self, e):
+        self._drag_over = False
+        folder = self._dropped_folder(e.mimeData())
+        if folder is None or not self._take(e):
+            return
+        self._last_activity = self.now
+        self.start("jump_happy", manual=True)
+        for k in range(3):
+            self._emit("spark", 6 + 6 * k, -4, vy=-5, life=700)
+        if not open_claude_code_in(folder) and getattr(self, "tray", None) is not None:
+            self.tray.showMessage("Clawd", "Couldn't open Claude Code for " + folder)
+
     def launch_claude_code(self, kind="continue"):
         if not open_claude_code(kind) and getattr(self, "tray", None) is not None:
             self.tray.showMessage("Clawd", "No terminal found to run Claude Code in.")
@@ -2827,6 +3006,9 @@ def main():
     pet._poll_cursor = feed is None
     if feed is not None:
         app.aboutToQuit.connect(stop_kwin_feed)
+        catcher = DropCatcher(pet)               # KWin won't hand drags to him directly
+        if catcher.typed:
+            pet.catcher = catcher
 
     if QSystemTrayIcon.isSystemTrayAvailable():
         tray = QSystemTrayIcon(tray_icon(sprites), app)

@@ -1002,6 +1002,114 @@ class Installer(unittest.TestCase):
         self.assertEqual(self.ih.strip(self.ih.install({"theme": "dark"})), {"theme": "dark"})
 
 
+class DropAFolder(unittest.TestCase):
+    def setUp(self):
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.tmp = tempfile.mkdtemp()
+        self.opened = []
+        self.real = cp.open_claude_code_in
+        cp.open_claude_code_in = lambda folder: self.opened.append(folder) or True
+
+    def tearDown(self):
+        cp.open_claude_code_in = self.real
+        self.pet.timer.stop()
+        if self.pet.catcher is not None:
+            self.pet.catcher.deleteLater()
+        self.pet.deleteLater()
+
+    def event(self, kind, path, actions=Qt.DropAction.CopyAction):
+        from PyQt6.QtCore import QMimeData, QPoint, QPointF, QUrl
+        from PyQt6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+        mime = self.mime = QMimeData()        # the event only borrows it: keep it alive
+        mime.setUrls([QUrl.fromLocalFile(path)])
+        args = (actions, mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        if kind == "enter":
+            return QDragEnterEvent(QPoint(10, 10), *args)
+        if kind == "move":
+            return QDragMoveEvent(QPoint(12, 10), *args)
+        return QDropEvent(QPointF(10, 10), *args)
+
+    def test_the_link_for_a_folder(self):
+        self.assertEqual(cp.claude_link_for_folder("/home/me/My Project"),
+                         "claude://code/new?folder=%2Fhome%2Fme%2FMy%20Project")
+
+    def test_dropping_a_folder_starts_a_session_in_it(self):
+        self.pet.dropEvent(self.event("drop", self.tmp))
+        self.assertEqual(self.opened, [self.tmp])
+        self.assertEqual(self.pet.action, "jump_happy")
+
+    def test_dropping_a_file_uses_its_folder(self):
+        f = os.path.join(self.tmp, "notes.txt")
+        open(f, "w").close()
+        self.pet.dropEvent(self.event("drop", f))
+        self.assertEqual(self.opened, [self.tmp])
+
+    def test_a_drop_is_a_copy_never_a_move(self):
+        both = Qt.DropAction.MoveAction | Qt.DropAction.CopyAction
+        ev = self.event("drop", self.tmp, both)
+        self.pet.dropEvent(ev)
+        self.assertEqual(ev.dropAction(), Qt.DropAction.CopyAction)
+        self.assertEqual(self.opened, [self.tmp])
+        ev = self.event("drop", self.tmp, Qt.DropAction.MoveAction)   # only a move on offer: refuse
+        self.pet.dropEvent(ev)
+        self.assertFalse(ev.isAccepted())
+        self.assertEqual(self.opened, [self.tmp])
+
+    def test_dragging_something_over_him_gets_him_excited(self):
+        ev = self.event("enter", self.tmp)
+        self.pet.dragEnterEvent(ev)
+        self.assertTrue(ev.isAccepted())
+        self.pet.advance(16)
+        self.assertEqual(self.pet.frame[:3], ("anim", "jump", 2))
+        self.pet.dragLeaveEvent(None)
+        run_ms(self.pet, 300)
+        self.assertNotEqual(self.pet.frame[:3], ("anim", "jump", 2))
+
+    def test_he_holds_still_while_something_hovers_over_him(self):
+        self.pet.start("walk", manual=True)
+        run_ms(self.pet, 500)
+        self.pet.dragEnterEvent(self.event("enter", self.tmp))
+        x = self.pet.x
+        for _ in range(60):
+            self.pet.dragMoveEvent(self.event("move", self.tmp))
+            self.pet.advance(16)
+        self.assertEqual(self.pet.x, x)
+        self.pet.dragLeaveEvent(None)
+        run_ms(self.pet, 800)
+        self.assertNotEqual(self.pet.x, x)          # and carries on walking afterwards
+
+    def test_a_drag_that_vanishes_is_forgotten(self):
+        self.pet.dragEnterEvent(self.event("enter", self.tmp))
+        run_ms(self.pet, cp.DRAG_FORGET + 500)
+        self.assertFalse(self.pet._drag_over)
+
+    def test_the_catcher_sits_exactly_under_him(self):
+        self.pet.catcher = cp.DropCatcher(self.pet)
+        self.pet.show()
+        run_ms(self.pet, 100)
+        c = self.pet.catcher
+        self.assertTrue(c.isVisible())
+        self.assertEqual(c.geometry(), self.pet.geometry())
+        self.assertEqual(c.mask(), self.pet._mask)
+        self.pet.x += 40
+        run_ms(self.pet, 32)
+        self.assertEqual(c.geometry(), self.pet.geometry())
+        self.pet.hide()                             # ducking out of a fullscreen window
+        run_ms(self.pet, 32)
+        self.assertFalse(c.isVisible())
+
+    def test_drops_on_the_catcher_reach_him(self):
+        c = cp.DropCatcher(self.pet)
+        self.pet.catcher = c
+        ev = self.event("enter", self.tmp)
+        c.dragEnterEvent(ev)
+        self.assertTrue(ev.isAccepted())
+        self.assertTrue(self.pet._drag_over)
+        c.dropEvent(self.event("drop", self.tmp))
+        self.assertEqual(self.opened, [self.tmp])
+        self.assertFalse(self.pet._drag_over)
+
+
 class Launcher(unittest.TestCase):
     def test_clicking_opens_the_code_tab_of_the_app(self):
         self.assertEqual(cp.CLAUDE_LINKS["continue"], "claude://code/continue?session=last")
