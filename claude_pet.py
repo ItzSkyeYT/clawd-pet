@@ -42,7 +42,9 @@ from PyQt6.QtCore import (QElapsedTimer, QObject, QPoint, QRect, QSettings, Qt, 
 from PyQt6.QtGui import (QActionGroup, QBitmap, QCursor, QGuiApplication, QIcon, QImage, QPainter,
                          QPixmap, QRegion)
 from PyQt6.QtNetwork import QLocalServer
-from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout,
+                             QGroupBox, QHBoxLayout, QLabel, QMenu, QPushButton, QSpinBox,
+                             QSystemTrayIcon, QVBoxLayout, QWidget)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SPRITES = os.path.join(HERE, "sprites", "clawd.json")
@@ -83,6 +85,59 @@ ON_A_WINDOW = ["walk", "wave", "jump", "jump_happy", "dance", "laptop", "sparkle
 AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["perch_window", "hop_down", "visit", "read"]
 CLAUDE_PREVIEWS = ["work", "attention", "celebrate"]
 PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + ["idle"])
+
+# ── Settings ────────────────────────────────────────────────────────
+
+PREF_DEFAULTS = {
+    "activity": "normal",     # calm | normal | lively: how long he rests between scenes
+    "scenes_off": [],         # scenes he doesn't do on his own (the Play menu still has them all)
+    "quiet": False,           # stays put and keeps to himself; Claude Code still shows
+    "pointer": True,          # watches the pointer
+    "petting": True,          # stroke him for hearts
+    "duck": True,             # drops out of sight for fullscreen windows
+    "day_cycle": True,        # yawns and naps at night, coffee in the morning
+    "seasons": True,          # hats and extras on holidays
+    "breaks": True,           # break reminders...
+    "break_every": 60,        # ...after this many minutes at the computer
+    "water": True,            # water reminders...
+    "water_every": 45,        # ...this often (minutes)
+}
+ACTIVITY = {"calm": 2.0, "normal": 1.0, "lively": 0.5}      # multiplies the rest between scenes
+OWN_SCENES = [["walk", "wave", "jump", "jump_happy", "dance", "laptop"],
+              ["sparkler", "cloud", "race", "lurk", "sleep"],
+              ["climb", "leap", "perch_window", "visit", "read"]]
+OWN_SCENE_ACTIONS = {k for col in OWN_SCENES for k in col} - {"sleep"}
+
+
+class Prefs:
+    """His settings with their defaults, kept in QSettings (in memory without one)."""
+
+    def __init__(self, settings=None):
+        self.settings = settings
+        self._mem = {}
+
+    def __getitem__(self, key):
+        default = PREF_DEFAULTS[key]
+        if self.settings is None:
+            return self._mem.get(key, default)
+        v = self.settings.value("prefs/" + key, default)
+        # An INI file hands everything back as strings, and a one-item list as its item.
+        if isinstance(default, bool):
+            return v if isinstance(v, bool) else str(v).lower() in ("true", "1")
+        if isinstance(default, int):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return default
+        if isinstance(default, list):
+            return [] if v in (None, "") else [v] if isinstance(v, str) else list(v)
+        return str(v)
+
+    def __setitem__(self, key, value):
+        if self.settings is None:
+            self._mem[key] = value
+        else:
+            self.settings.setValue("prefs/" + key, value)
 
 # Where the eyes sit in the idle pose (top-left of each 2x2 eye).
 EYES = ((6, 2), (16, 2))
@@ -600,6 +655,37 @@ def write_icon(folder):
     return path
 
 
+def hook_installer():
+    """tools/install_hooks.py, loaded as a module."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("install_hooks", os.path.join(HERE, "tools", "install_hooks.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def hooks_installed(path=None):
+    """(events that run Clawd's hook, events it wants) in Claude Code's settings."""
+    inst = hook_installer()
+    try:
+        with open(path or inst.SETTINGS) as f:
+            hooks = json.load(f).get("hooks") or {}
+        have = sum(1 for event in inst.EVENTS
+                   if any(inst.MARK in h.get("command", "") for g in hooks.get(event, []) for h in g.get("hooks", [])))
+    except (OSError, ValueError, AttributeError, TypeError):
+        have = 0
+    return have, len(inst.EVENTS)
+
+
+def run_hook_installer(remove=False):
+    """Install (or remove) the hooks with tools/install_hooks.py; True if it worked."""
+    cmd = [sys.executable, os.path.join(HERE, "tools", "install_hooks.py")] + (["--remove"] if remove else [])
+    try:
+        return subprocess.run(cmd, timeout=15, capture_output=True).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def autostart_enabled(entry=AUTOSTART):
     return os.path.exists(entry)
 
@@ -1047,6 +1133,7 @@ class ClawdPet(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setMouseTracking(True)            # hovering over him counts as the pointer being near
         self.setAcceptDrops(True)              # drop a folder on him: a Claude Code session there
+        self.prefs = Prefs(settings)
         self.catcher = None                    # his DropCatcher, on KDE Wayland
         self._drag_over = False
         self._drag_seen = 0.0
@@ -1245,7 +1332,7 @@ class ClawdPet(QWidget):
                 self.x += now["x"] - old["x"]
                 self.y += now["y"] - old["y"]
         self.window_list = new
-        if self._fullscreen_here() and self.action != "duck" and not self.dragging:
+        if self.prefs["duck"] and self._fullscreen_here() and self.action != "duck" and not self.dragging:
             self.start("duck")
 
     def _screen_name(self):
@@ -1391,7 +1478,9 @@ class ClawdPet(QWidget):
 
     def _next(self):
         mode = self.claude_mode()
-        if self._fullscreen_here():
+        if self.prefs["quiet"]:
+            self.celebrate, self.greet = None, False
+        if self.prefs["duck"] and self._fullscreen_here():
             self.start("duck")
         elif mode == "attention":
             self.start("attention")
@@ -1408,7 +1497,9 @@ class ClawdPet(QWidget):
             self.start("idle")
 
     def _rest_range(self):
-        return REST_SLEEPY if self.now - self._last_activity > WIND_DOWN else REST
+        lo, hi = REST_SLEEPY if self.now - self._last_activity > WIND_DOWN else REST
+        k = ACTIVITY.get(self.prefs["activity"], 1.0)
+        return lo * k, hi * k
 
     def _engaged(self):
         """Is the pointer near him and moving (you're playing with him)?"""
@@ -1422,14 +1513,25 @@ class ClawdPet(QWidget):
         return abs(c[0] - (left + right) / 2) < near and abs(c[1] - self._mid()) < near
 
     def _pick_action(self):
+        off = set(self.prefs["scenes_off"])
+        drowsy = self.now - self._last_activity > WIND_DOWN
+        if self.prefs["quiet"]:                    # keeps to himself: a nap at most
+            return "sleep" if drowsy and "sleep" not in off and random.random() < 0.3 else "idle"
+        weights = self._scene_weights(drowsy)
+        weights = {k: v for k, v in weights.items() if v > 0 and (k not in off or k == "hop_down")}
+        if not weights:
+            return "idle"
+        return random.choices(list(weights), weights=list(weights.values()))[0]
+
+    def _scene_weights(self, drowsy):
         weights = dict(WEIGHTS)
         if self._window_under() is not None:       # up on a window: things that fit up there
             weights = {k: v for k, v in weights.items() if k in ON_A_WINDOW}
             weights["hop_down"] = 12
-            return random.choices(list(weights), weights=list(weights.values()))[0]
+            return weights
         if self._window_target() is not None:
             weights["perch_window"] = 10
-        if self.now - self._last_activity > WIND_DOWN:
+        if drowsy:
             weights["sleep"] = 25                 # nothing's happened for a while: nap time
         if self._lurk_side() is None:
             weights["lurk"] = 0
@@ -1442,7 +1544,7 @@ class ClawdPet(QWidget):
             weights["leap"] = 6
         elif self._seam("down") is not None:
             weights["climb"] = 10
-        return random.choices(list(weights), weights=list(weights.values()))[0]
+        return weights
 
     def _lurk_side(self):
         """The nearer screen edge if he's close to it and nothing lies beyond it."""
@@ -1669,7 +1771,7 @@ class ClawdPet(QWidget):
             self.start("attention")
         elif mode == "busy" and self.action not in ("work", "attention"):
             self.start("work")
-        elif mode is None and self.greet and self.action == "idle":
+        elif mode is None and self.greet and self.action == "idle" and not self.prefs["quiet"]:
             self.greet = False
             self.start("wave")
 
@@ -1701,7 +1803,7 @@ class ClawdPet(QWidget):
                 self._pet_flips.append(self.now)
             self._pet_dir = d
         self._pet_flips = [t for t in self._pet_flips if self.now - t < 1500]
-        if over and len(self._pet_flips) >= 3:      # stroked back and forth: petting
+        if over and len(self._pet_flips) >= 3 and self.prefs["petting"]:   # stroked back and forth
             self._petting_until = self.now + 500
         if self._engaged():
             self._last_activity = self.now
@@ -1728,7 +1830,7 @@ class ClawdPet(QWidget):
     def _watch_cursor(self):
         """While idle, follow a nearby, moving pointer with his eyes."""
         if (self.action not in ("idle", "visit", "attention") or self.frame[0] != "pose"
-                or self.now < self._petting_until):
+                or self.now < self._petting_until or not self.prefs["pointer"]):
             self._tracking = False
             return
         eyes = None
@@ -1751,7 +1853,7 @@ class ClawdPet(QWidget):
 
     def _glance(self):
         """Which way to look: usually toward the pointer, if we know where it is."""
-        if self.cursor is not None and random.random() < 0.7:
+        if self.cursor is not None and self.prefs["pointer"] and random.random() < 0.7:
             return "look_l" if self.cursor[0] < sum(self.box_span()) / 2 else "look_r"
         return random.choice(("look_l", "look_r"))
 
@@ -2173,7 +2275,8 @@ class ClawdPet(QWidget):
         if self.now < self._glance_until:
             return self._glance_dir
         c = self.cursor
-        if c is None or self.now - c[2] > 700 or self.now < self._glance_cooldown:
+        if (c is None or self.now - c[2] > 700 or self.now < self._glance_cooldown
+                or not self.prefs["pointer"]):
             return None
         left, right = self.box_span()
         cx, near = (left + right) / 2, CURSOR_NEAR * self.scale
@@ -2450,7 +2553,7 @@ class ClawdPet(QWidget):
             yield TICK_MS
         self.ducked = True
         self.hide()
-        while self._fullscreen_here(screen):
+        while self.prefs["duck"] and self._fullscreen_here(screen):
             yield 400
         self.ducked = False
         self.show()
@@ -2940,6 +3043,21 @@ class ClawdPet(QWidget):
         if not open_in_terminal() and getattr(self, "tray", None) is not None:
             self.tray.showMessage("Clawd", "No terminal found to run Claude Code in.")
 
+    # ── Settings ──────────────────────────────────────────────────
+
+    def set_pref(self, key, value):
+        self.prefs[key] = value
+        if key == "quiet" and value and not self.manual and self.action in OWN_SCENE_ACTIONS:
+            self.start("idle")                   # hush: wrap up whatever he was doing
+
+    def open_settings(self):
+        d = getattr(self, "_settings_dialog", None)
+        if d is None or not d.isVisible():
+            d = self._settings_dialog = SettingsDialog(self)
+        d.show()
+        d.raise_()
+        d.activateWindow()
+
     # ── Menus ─────────────────────────────────────────────────────
 
     def fill_menu(self, m):
@@ -2965,6 +3083,11 @@ class ClawdPet(QWidget):
             group.addAction(act)
             act.triggered.connect(lambda _=False, s=s: self.set_scale(s))
         m.addSeparator()
+        quiet = m.addAction("Quiet mode")
+        quiet.setCheckable(True)
+        quiet.setChecked(self.prefs["quiet"])
+        quiet.triggered.connect(lambda on: self.set_pref("quiet", on))
+        m.addAction("Settings…").triggered.connect(lambda _=False: self.open_settings())
         login = m.addAction("Start at login")
         login.setCheckable(True)
         login.setChecked(autostart_enabled())
@@ -2976,6 +3099,132 @@ class ClawdPet(QWidget):
     def contextMenuEvent(self, e):
         self._menu = self.fill_menu(QMenu(self))
         self._menu.exec(e.globalPos())
+
+
+class SettingsDialog(QDialog):
+    """Clawd's settings. Every change applies straight away."""
+
+    def __init__(self, pet):
+        super().__init__(None)
+        self.pet = pet
+        self.checks, self.scenes, self.spins = {}, {}, {}
+        self.setWindowTitle("Clawd settings")
+        self.setWindowIcon(tray_icon(pet.sp))
+        root = QVBoxLayout(self)
+
+        box = QGroupBox("How he behaves")
+        grid = QGridLayout(box)
+        grid.addWidget(QLabel("Activity"), 0, 0)
+        self.activity = QComboBox()
+        for key, label in (("calm", "Calm: long rests between scenes"), ("normal", "Normal"),
+                           ("lively", "Lively: always up to something")):
+            self.activity.addItem(label, key)
+        self.activity.setCurrentIndex(max(0, self.activity.findData(pet.prefs["activity"])))
+        self.activity.currentIndexChanged.connect(
+            lambda _i: pet.set_pref("activity", self.activity.currentData()))
+        grid.addWidget(self.activity, 0, 1)
+        grid.addWidget(QLabel("Size"), 1, 0)
+        self.scale_box = QComboBox()
+        for label, scale in SCALES.items():
+            self.scale_box.addItem(label, scale)
+        self.scale_box.setCurrentIndex(max(0, self.scale_box.findData(pet.scale)))
+        self.scale_box.currentIndexChanged.connect(lambda _i: pet.set_scale(self.scale_box.currentData()))
+        grid.addWidget(self.scale_box, 1, 1)
+        grid.addWidget(self._check("quiet", "Quiet mode: he stays put and keeps to himself "
+                                            "(Claude Code still shows)"), 2, 0, 1, 2)
+        root.addWidget(box)
+
+        box = QGroupBox("What he does on his own (the Play menu still has everything)")
+        grid = QGridLayout(box)
+        off = set(pet.prefs["scenes_off"])
+        for col, keys in enumerate(OWN_SCENES):
+            for row, key in enumerate(keys):
+                cb = QCheckBox(LABELS[key])
+                cb.setChecked(key not in off)
+                cb.toggled.connect(lambda on, k=key: self._scene(k, on))
+                grid.addWidget(cb, row, col)
+                self.scenes[key] = cb
+        root.addWidget(box)
+
+        box = QGroupBox("Reactions")
+        lay = QVBoxLayout(box)
+        lay.addWidget(self._check("pointer", "Watch the pointer"))
+        lay.addWidget(self._check("petting", "Enjoy being petted (stroke him back and forth)"))
+        lay.addWidget(self._check("duck", "Duck out of sight while something is fullscreen"))
+        root.addWidget(box)
+
+        box = QGroupBox("Time and seasons")
+        lay = QVBoxLayout(box)
+        lay.addWidget(self._check("day_cycle", "Time of day: yawns and naps at night, coffee in the morning"))
+        lay.addWidget(self._check("seasons", "Holidays: Santa hat in December, pumpkin at Halloween, "
+                                             "party hat at New Year"))
+        root.addWidget(box)
+
+        box = QGroupBox("Reminders (click him when you've seen one)")
+        grid = QGridLayout(box)
+        self._reminder(grid, 0, "breaks", "break_every", "Take a break every", "minutes at the computer")
+        self._reminder(grid, 1, "water", "water_every", "Drink some water every", "minutes")
+        root.addWidget(box)
+
+        box = QGroupBox("Claude Code")
+        grid = QGridLayout(box)
+        self.hooks_label = QLabel()
+        self.hooks_label.setWordWrap(True)
+        self.hooks_button = QPushButton()
+        self.hooks_button.clicked.connect(lambda _=False: self._flip_hooks())
+        grid.addWidget(self.hooks_label, 0, 0)
+        grid.addWidget(self.hooks_button, 0, 1)
+        self.login = QCheckBox("Start Clawd at login")
+        self.login.setChecked(autostart_enabled())
+        self.login.toggled.connect(lambda on: set_autostart(on))
+        grid.addWidget(self.login, 1, 0, 1, 2)
+        root.addWidget(box)
+        self._show_hooks()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.close)
+        root.addWidget(buttons)
+
+    def _check(self, key, label):
+        cb = QCheckBox(label)
+        cb.setChecked(self.pet.prefs[key])
+        cb.toggled.connect(lambda on: self.pet.set_pref(key, on))
+        self.checks[key] = cb
+        return cb
+
+    def _scene(self, key, on):
+        off = [k for k in self.pet.prefs["scenes_off"] if k != key]
+        self.pet.set_pref("scenes_off", off if on else off + [key])
+
+    def _reminder(self, grid, row, flag, every, before, after):
+        cb = self._check(flag, before)
+        spin = QSpinBox()
+        spin.setRange(10, 240)
+        spin.setSingleStep(5)
+        spin.setValue(self.pet.prefs[every])
+        spin.setEnabled(cb.isChecked())
+        spin.valueChanged.connect(lambda v: self.pet.set_pref(every, v))
+        cb.toggled.connect(spin.setEnabled)
+        grid.addWidget(cb, row, 0)
+        grid.addWidget(spin, row, 1)
+        grid.addWidget(QLabel(after), row, 2)
+        self.spins[every] = spin
+
+    def _show_hooks(self):
+        have, want = hooks_installed()
+        if have == want:
+            text, button = "Hooks installed: he follows what Claude Code is doing.", "Remove"
+        elif have:
+            text, button = f"Hooks partly installed ({have} of {want} events).", "Repair"
+        else:
+            text, button = "Hooks not installed: he can't see what Claude Code is doing.", "Install"
+        self.hooks_label.setText(text)
+        self.hooks_button.setText(button)
+
+    def _flip_hooks(self):
+        have, want = hooks_installed()
+        run_hook_installer(remove=have == want)
+        self._show_hooks()
 
 
 def tray_icon(sprites):

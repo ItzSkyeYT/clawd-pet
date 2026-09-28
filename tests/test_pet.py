@@ -24,7 +24,7 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen:configfile=" + os.path.join(ROOT, "te
 os.environ["CLAWD_NO_DESKTOP_ICONS"] = "1"      # never read the real desktop's icons in tests
 sys.path.insert(0, ROOT)
 
-from PyQt6.QtCore import QRect, Qt  # noqa: E402
+from PyQt6.QtCore import QRect, QSettings, Qt  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 APP = QApplication.instance() or QApplication([])
@@ -1108,6 +1108,134 @@ class DropAFolder(unittest.TestCase):
         c.dropEvent(self.event("drop", self.tmp))
         self.assertEqual(self.opened, [self.tmp])
         self.assertFalse(self.pet._drag_over)
+
+
+class Settings(unittest.TestCase):
+    def setUp(self):
+        random.seed(3)
+        self.dir = tempfile.mkdtemp()
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.pet.start("idle")
+        run_ms(self.pet, 100)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def ini(self):
+        return QSettings(os.path.join(self.dir, "clawd.conf"), QSettings.Format.IniFormat)
+
+    def test_prefs_survive_a_round_trip_through_an_ini_file(self):
+        p = cp.Prefs(self.ini())
+        p["quiet"], p["break_every"], p["scenes_off"], p["activity"] = True, 30, ["dance"], "calm"
+        p.settings.sync()
+        q = cp.Prefs(self.ini())
+        self.assertIs(q["quiet"], True)
+        self.assertEqual(q["break_every"], 30)
+        self.assertEqual(q["scenes_off"], ["dance"])        # a one-item list comes back as a string
+        self.assertEqual(q["activity"], "calm")
+        self.assertIs(q["duck"], True)                      # untouched: the default
+        q["scenes_off"] = []
+        q.settings.sync()
+        self.assertEqual(cp.Prefs(self.ini())["scenes_off"], [])
+
+    def test_scenes_turned_off_are_never_picked(self):
+        off = [k for k in cp.WEIGHTS if k != "wave"]
+        self.pet.prefs["scenes_off"] = off
+        picks = {self.pet._pick_action() for _ in range(300)}
+        self.assertFalse(picks & set(off), picks)
+        self.assertIn("wave", picks)
+
+    def test_quiet_mode_keeps_him_put(self):
+        self.pet.set_pref("quiet", True)
+        self.assertLessEqual({self.pet._pick_action() for _ in range(300)}, {"idle", "sleep"})
+        self.pet.celebrate = 60_000
+        self.pet._next()
+        self.assertNotEqual(self.pet.action, "celebrate")
+        self.pet.claude_event({"event": "UserPromptSubmit", "session": "q"})
+        run_ms(self.pet, 500)
+        self.assertEqual(self.pet.action, "work")            # Claude Code still shows
+
+    def test_quiet_mode_wraps_up_a_scene(self):
+        self.pet.start("dance")
+        self.pet.set_pref("quiet", True)
+        self.assertEqual(self.pet.action, "idle")
+
+    def test_activity_sets_how_long_he_rests(self):
+        self.pet.prefs["activity"] = "calm"
+        self.assertEqual(self.pet._rest_range(), (cp.REST[0] * 2, cp.REST[1] * 2))
+        self.pet.prefs["activity"] = "lively"
+        self.assertEqual(self.pet._rest_range(), (cp.REST[0] / 2, cp.REST[1] / 2))
+
+    def stroke(self):
+        left, right = self.pet.box_span()
+        cx, mid = (left + right) / 2, self.pet._mid()
+        hearts = False
+        for i in range(40):
+            self.pet.cursor_moved(cx + (25 if i % 2 else -25), mid)
+            run_ms(self.pet, 80)
+            hearts = hearts or any(q["kind"] == "heart" for q in self.pet.particles)
+        return hearts
+
+    def test_no_hearts_when_petting_is_off(self):
+        self.pet.prefs["petting"] = False
+        self.assertFalse(self.stroke())
+
+    def test_no_eyes_on_the_pointer_when_that_is_off(self):
+        self.pet.prefs["pointer"] = False
+        left, _ = self.pet.box_span()
+        for i in range(20):
+            self.pet.cursor_moved(left - 60 - i, self.pet._mid())
+            run_ms(self.pet, 50)
+        self.assertFalse(self.pet._tracking)
+        self.assertIsNone(self.pet._typing_reaction())
+
+    def test_no_ducking_when_that_is_off(self):
+        self.pet.prefs["duck"] = False
+        self.pet.set_box_left(600)
+        geo = self.pet.screen_geometry()
+        self.pet.windows_changed([[geo.left(), geo.top(), geo.width(), geo.height(), 9, 1, 1,
+                                   self.pet._screen_name(), "video"]])
+        run_ms(self.pet, 2000)
+        self.assertFalse(self.pet.ducked)
+
+    def test_the_dialog_changes_his_settings(self):
+        real = cp.hooks_installed
+        cp.hooks_installed = lambda path=None: (13, 13)
+        try:
+            d = cp.SettingsDialog(self.pet)
+            self.assertEqual(d.hooks_button.text(), "Remove")
+            d.checks["pointer"].setChecked(False)
+            self.assertIs(self.pet.prefs["pointer"], False)
+            d.scenes["dance"].setChecked(False)
+            d.scenes["race"].setChecked(False)
+            d.scenes["dance"].setChecked(True)
+            self.assertEqual(self.pet.prefs["scenes_off"], ["race"])
+            d.activity.setCurrentIndex(d.activity.findData("lively"))
+            self.assertEqual(self.pet.prefs["activity"], "lively")
+            d.checks["water"].setChecked(False)
+            self.assertFalse(d.spins["water_every"].isEnabled())
+            d.spins["break_every"].setValue(90)
+            self.assertEqual(self.pet.prefs["break_every"], 90)
+            d.scale_box.setCurrentIndex(d.scale_box.findData(6))
+            self.assertEqual(self.pet.scale, 6)
+            d.close()
+            d.deleteLater()
+        finally:
+            cp.hooks_installed = real
+
+    def test_hooks_status_counts_the_events(self):
+        path = os.path.join(self.dir, "settings.json")
+        inst = cp.hook_installer()
+        with open(path, "w") as f:
+            json.dump(inst.install({}, hook="/x/clawd_hook.py"), f)
+        self.assertEqual(cp.hooks_installed(path), (len(inst.EVENTS), len(inst.EVENTS)))
+        with open(path, "w") as f:
+            json.dump({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "python3 clawd_hook.py"}]}]}}, f)
+        self.assertEqual(cp.hooks_installed(path)[0], 1)
+        with open(path, "w") as f:
+            f.write("not json")
+        self.assertEqual(cp.hooks_installed(path)[0], 0)
 
 
 class Launcher(unittest.TestCase):
