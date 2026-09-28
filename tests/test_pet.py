@@ -2392,6 +2392,19 @@ class Physics(unittest.TestCase):
         self.drag(moving + [(700, 780, 500), (710, 780, 500)])              # held still, then let go
         self.assertAlmostEqual(self.pet.vx, 0, delta=50)
 
+    def test_under_a_parachute_he_comes_down_gently_and_lands_softly(self):
+        s = self.pet.scale
+        self.pet.chute = "parachute"
+        track = self.throw(30 * s, 0, 600)
+        vys = [t[2] for t in track if t[3]]
+        self.assertLessEqual(max(vys), cp.CHUTE_FALL * s * 1.05)       # never faster than the chute allows
+        self.assertFalse(any(v < 0 for v in vys[10:]))                 # no bounce at the bottom
+        self.assertFalse(self.pet.airborne)
+        self.assertAlmostEqual(self.pet.y, self.pet.ground_y(), delta=1)
+        xs = [t[0] for t in track if t[3]]
+        steps = [b - a for a, b in zip(xs, xs[1:])]
+        self.assertTrue(any(d > 0 for d in steps) and any(d < 0 for d in steps))   # swaying
+
     def test_he_flies_off_the_pointer_with_his_swing(self):
         left, right = self.pet.box_span()
         self.pet.cursor_moved(int((left + right) / 2), int(self.pet.y + self.pet.home_px.y() - 40))

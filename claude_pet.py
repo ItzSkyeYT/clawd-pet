@@ -63,6 +63,8 @@ BOUNCE = 0.3                  # a hard landing bounces back up with this much of
 BOUNCE_MIN = 180              # ...if it's faster than this (cells/s): a fall of ~20 cells or more
 SKID = 6.0                    # 1/s: how quickly a sideways landing skids to a stop
 AIR_DRAG = 0.35               # 1/s: the air slowing him sideways
+CHUTE_FALL = 32               # cells/s: how fast he comes down under a parachute or umbrella
+CHUTE_SWAY = (2.5, 0.9)       # cells, Hz: swaying from side to side on the way down
 THROW_WINDOW = 100            # ms: a throw goes as fast as the drag moved in its last moments
 MASK_BLOCK = 4                # cells: moving particles shape the window in blocks this big
 PIXMAP_CACHE = 120            # scaled frames kept ready (the ones used most recently)
@@ -1617,6 +1619,8 @@ class ClawdPet(QWidget):
         self._pet_ms = 0.0
         self._last_heart = -1e9
         self._skid = 0.0                       # sideways speed left over from a landing
+        self.chute = None                      # "parachute" or "umbrella" while one's open
+        self._chute_t = 0.0
         self._body_key = self._shape_key = None
         self._body_mask = None                 # his shape without flying particles (the catcher's)
         self._tiny = QRegion(0, 0, 1, 1)
@@ -2131,10 +2135,18 @@ class ClawdPet(QWidget):
         sec = dt / 1000
         s = self.scale
         if self.airborne:
-            self.vy = min(self.vy + GRAVITY * s * sec, 250 * s)
-            self.vx *= math.exp(-AIR_DRAG * sec)
+            if self.chute:                               # held up by it: a gentle fall, swaying
+                self.vy += (CHUTE_FALL * s - self.vy) * min(1.0, 4 * sec)
+                self.vx *= math.exp(-1.5 * sec)
+                self._chute_t += sec
+                w = 2 * math.pi * CHUTE_SWAY[1]
+                sway = CHUTE_SWAY[0] * s * w * math.cos(w * self._chute_t)
+            else:
+                self.vy = min(self.vy + GRAVITY * s * sec, 250 * s)
+                self.vx *= math.exp(-AIR_DRAG * sec)
+                sway = 0.0
             was = self._feet()
-            self._slide(self.vx * sec, bounce=True)
+            self._slide((self.vx + sway) * sec, bounce=True)
             self.y += self.vy * sec
             ceiling = self.screen_geometry().top() - self.home_px.y()
             if self.y < ceiling:
@@ -2144,7 +2156,7 @@ class ClawdPet(QWidget):
             ground = (below[0] - self.home_px.y() - self.ih * s) if below else self.ground_y()
             if self.y >= ground:
                 self.y = ground
-                if self.vy > BOUNCE_MIN * s:             # a hard landing: a little bounce
+                if self.vy > BOUNCE_MIN * s and not self.chute:   # a hard landing: a little bounce
                     self.vy = -self.vy * BOUNCE
                     self.vx *= 0.7
                 else:                                   # down: skid off what's left sideways
