@@ -86,8 +86,8 @@ to what Claude Code is doing.
   pulls out a page, puts on reading glasses and reads it like a story, reacting as he
   goes (surprised, teary, laughing, in love, scared, confused), then puts it all back
 - He walks on windows: hops up onto a window's top edge or climbs its side hand over hand
-  and pulls himself up, rides it when you move the window (even mid-climb), hops or climbs
-  down again; ducks out of sight while something is fullscreen on his screen
+  and pulls himself up, leaps across gaps from one window top to the next, rides a window
+  when you move it (even mid-climb), hops or climbs down again; ducks out of sight while something is fullscreen on his screen
 - **A new wallpaper** makes him jump: he glances about, turns round to look (from behind
   he has no eyes), whips back with a "!" and jumps. Plasma slideshows change on the clock
   (whole multiples of the interval, 15 min by default), so he's ready for each one; a

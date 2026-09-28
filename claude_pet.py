@@ -95,6 +95,7 @@ LABELS = {
     "celebrate": "Celebrating (Claude Code done)",
     "perch_window": "Hop up onto a window", "hop_down": "Hop down from a window",
     "climb_window": "Climb up the side of a window", "climb_down": "Climb down the side of a window",
+    "window_jump": "Jump to another window",
     "yawn": "Yawn and stretch", "morning": "Good morning (stretch and coffee)", "coffee": "Coffee",
     "remind_break": "Reminder: take a break", "remind_water": "Reminder: drink some water",
     "grab": "Grab the pointer",
@@ -102,7 +103,8 @@ LABELS = {
 ON_A_WINDOW = ["walk", "wave", "jump", "jump_happy", "dance", "laptop", "sparkler", "sleep", "yawn"]
 LIVELY = ("dance", "race", "sparkler", "jump", "jump_happy", "cloud")   # calmer at night
 BOUNCY = {"walk", "dance", "jump", "jump_happy", "celebrate", "race", "wave"}   # a hat's pom-pom swings
-AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["perch_window", "hop_down", "climb_window", "climb_down", "visit", "read"]
+AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["perch_window", "hop_down", "climb_window", "climb_down", "window_jump",
+                                        "visit", "read"]
 CLAUDE_PREVIEWS = ["work", "attention", "celebrate"]
 TIME_SCENES = ["yawn", "morning", "coffee", "remind_break", "remind_water"]
 POINTER_SCENES = ["grab"]
@@ -136,7 +138,7 @@ PREF_DEFAULTS = {
 ACTIVITY = {"calm": 2.0, "normal": 1.0, "lively": 0.08}     # multiplies the rest between scenes
 OWN_SCENES = [["walk", "wave", "jump", "jump_happy", "dance", "laptop"],
               ["sparkler", "cloud", "race", "lurk", "sleep"],
-              ["climb", "leap", "perch_window", "climb_window", "visit", "read"]]
+              ["climb", "leap", "perch_window", "climb_window", "window_jump", "visit", "read"]]
 OWN_SCENE_ACTIONS = ({k for col in OWN_SCENES for k in col} - {"sleep"}) | {"yawn", "morning", "coffee"}
 
 
@@ -267,6 +269,9 @@ LADDER_PALETTE = {"d": RAIL_DARK, "l": RAIL_LIGHT}
 
 CURSOR_NEAR = 70              # sprite pixels: how close the pointer must be for him to watch it
 CLIMB_JUMP = 20               # cells: a window's side ending this far above his feet, he jumps up to
+LEAP_GAP = 45                 # cells: the widest gap he'll jump between two windows...
+LEAP_UP = 30                  # ...to a window top at most this much higher...
+LEAP_DOWN = 120               # ...or this much lower
 WINDOW_CLIMB = 1.3            # up a window's side a little quicker than a ladder
 GLANCE_MS = 1400
 ARMS_UP = ("anim", "jump", 2, False)   # a folder is being dragged over him: "for me?"
@@ -806,13 +811,15 @@ class Sprites:
         lean = dg_frames[LEAN_2]
         cells = [x for r in lean for x, c in enumerate(r) if c != "."]
         self.dangle_lean = 1 if sum(cells) / max(1, len(cells)) >= grip[0] + 1 else -1
-        # Climbing up a window's side, the edge along his right (mirrored for the other side)
-        if "climb_side" in extras:
-            cs = extras["climb_side"]
-            self.anims["climb_side"] = Anim("climb_side", {
-                "size": [len(cs["frames"][0][0]), len(cs["frames"][0])], "home": cs["home"],
-                "frames": [{"ms": 140, "rows": rows} for rows in cs["frames"]]},
-                {k: rgb(v) for k, v in cs["palette"].items()})
+        # Climbing: up a window's side (the edge along his right, mirrored for the
+        # other side) and up the ladder between screens
+        for name in ("climb_side", "climb_ladder"):
+            if name in extras:
+                cs = extras[name]
+                self.anims[name] = Anim(name, {
+                    "size": [len(cs["frames"][0][0]), len(cs["frames"][0])], "home": cs["home"],
+                    "frames": [{"ms": 140, "rows": rows} for rows in cs["frames"]]},
+                    {k: rgb(v) for k, v in cs["palette"].items()})
         # nightcap_stretch: the nightcap with its tail flipped up, out of the left arm's way
         self.hats = {n: (images(n), tuple(extras[n]["anchor"])) for n in list(HATS) + ["nightcap_stretch"]}
         self.hats_flipped = {n: [flipped(img) for img in frames] for n, (frames, _) in self.hats.items()}
@@ -1984,6 +1991,8 @@ class ClawdPet(QWidget):
             weights["hop_down"] = 12
             if self._climb_down_target() is not None:
                 weights["climb_down"] = 10
+            if self._jump_target() is not None:
+                weights["window_jump"] = 14             # across to the next one
             return weights
         if self._window_target() is not None:
             weights["perch_window"] = 10
@@ -2909,8 +2918,11 @@ class ClawdPet(QWidget):
         direction = -1 if target < self.y else 1
         self.scripted = True
         i = 0
+        name = "climb_ladder" if "climb_ladder" in self.sp.anims else "climb"
+        steps = len(self.sp.anims[name].frames)
         while (target - self.y) * direction > 0.5:
-            self.show_frame("climb", i % 2)
+            # climbing down, the cycle runs backwards
+            self.show_frame(name, i % steps if direction < 0 else (-i - 1) % steps)
             i += 1
             for _ in range(8):                   # about 130 ms per hand-over-hand step
                 yield TICK_MS
@@ -3968,6 +3980,54 @@ class ClawdPet(QWidget):
         ys = [y for y, x0, x1, _ in self._surfaces() if x0 <= cx < x1 and y > feet + 2]
         return min(ys) if ys else None
 
+    def _jump_target(self):
+        """From the window top he's on, another one to jump across to: (take-off
+        box left, landing box left, its top, its id). Not too far across, not
+        too much higher, in view, with room to land."""
+        on = self._window_under()
+        if on is None:
+            return None
+        _, x0, x1, wid = on
+        s, wpx = self.scale, self.iw * self.scale
+        feet, left = self._feet(), self.box_span()[0]
+        best = None
+        for y, a, b, other in self._surfaces():
+            if other is None or other == wid or b - a < wpx + 4 * s:
+                continue
+            if not (-LEAP_UP * s <= y - feet <= LEAP_DOWN * s):
+                continue
+            if a >= x1:                                    # off to the right
+                gap, launch, land = a - x1, x1 - wpx, a + 2 * s
+            elif b <= x0:                                  # off to the left
+                gap, launch, land = x0 - b, x0, b - wpx - 2 * s
+            else:
+                continue                                   # right above or below: hop, don't leap
+            if gap > LEAP_GAP * s or area_at(land + wpx / 2, y - 1) is None:
+                continue
+            cost = gap + abs(y - feet) / 2 + abs(launch - left) / 4
+            if best is None or cost < best[0]:
+                best = (cost, launch, land, y, other)
+        return best[1:] if best else None
+
+    def _act_window_jump(self):
+        """To the edge of the window he's on, a crouch, and a leap across to the next one."""
+        target = self._jump_target()
+        if target is None:
+            return
+        launch, land, top, _ = target
+        s = self.scale
+        yield from self._walk_to(launch)
+        self.pose("look_r" if land > launch else "look_l")   # eyeing up the gap
+        yield 600
+        self.show_frame("jump", 1)                          # crouch...
+        yield 180
+        self.show_frame("jump", 2)                          # ...and go
+        gap = abs(land - launch) - self.iw * s
+        yield from self._arc_to(land, top, 10 * s + 0.25 * max(gap, 0))
+        yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
+        self.pose("happy")
+        yield 500
+
     def _act_climb_window(self):
         """Walk to the side of a window and climb it, hand over hand up its
         edge, then pull himself up onto the top."""
@@ -4055,10 +4115,10 @@ class ClawdPet(QWidget):
                     self.pose("idle")
                 return True
             if k % 8 == 0:                                  # the edge beside him (or the ladder frames)
-                if "climb_side" in self.sp.anims:
-                    self.show_frame("climb_side", (k // 8) % 2, side > 0)
-                else:
-                    self.show_frame("climb", (k // 8) % 2)
+                name = "climb_side" if "climb_side" in self.sp.anims else "climb"
+                steps = len(self.sp.anims[name].frames)
+                step = (k // 8) % steps if up else (-(k // 8) - 1) % steps   # down: the cycle backwards
+                self.show_frame(name, step, name == "climb_side" and side > 0)
             k += 1
             step = CLIMB_SPEED * WINDOW_CLIMB * s * TICK_MS / 1000
             self.y += -step if up else step

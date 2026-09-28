@@ -563,6 +563,65 @@ class ClimbingWindows(unittest.TestCase):
         self.assertEqual(self.pet._pick_action(), "climb_window")
 
 
+class JumpingBetweenWindows(unittest.TestCase):
+    A = [300, 1000, 400, 600, 3, 0, 1, "eDP-1", "a"]
+    B = [800, 950, 400, 600, 4, 0, 0, "eDP-1", "b"]           # 100 px across, a bit higher
+
+    def setUp(self):
+        random.seed(23)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def stand_on(self, box_left, feet):
+        self.pet.set_box_left(box_left)
+        self.pet.y = feet - self.pet.home_px.y() - self.pet.ih * self.pet.scale
+        self.pet.start("idle")
+        self.pet.advance(16)
+
+    def test_he_leaps_across_to_the_next_window(self):
+        self.pet.windows_changed([self.A, self.B])
+        self.stand_on(400, 1000)
+        self.assertEqual(self.pet.standing_on, "a")
+        self.pet.play("window_jump")
+        seen = set()
+        run_ms(self.pet, 20_000, until=lambda: seen.add(self.pet.frame[1]) or
+               (self.pet.action != "window_jump" and not self.pet.airborne))
+        self.assertEqual(self.pet.standing_on, "b")
+        self.assertAlmostEqual(self.pet._feet(), 950, delta=1)
+        left, right = self.pet.box_span()
+        self.assertTrue(800 <= left and right <= 1200, (left, right))
+        self.assertIn("jump", seen)
+
+    def test_and_back_the_other_way(self):
+        self.pet.windows_changed([self.A, self.B])
+        self.stand_on(1000, 950)
+        target = self.pet._jump_target()
+        self.assertEqual(target[3], "a")
+
+    def test_not_across_a_gap_too_wide(self):
+        far = list(self.B)
+        far[0] = 700 + 400 + 60 * self.pet.scale                 # way over there
+        self.pet.windows_changed([self.A, far])
+        self.stand_on(400, 1000)
+        self.assertIsNone(self.pet._jump_target())
+
+    def test_not_to_a_window_hidden_behind_another(self):
+        cover = [750, 700, 500, 800, 9, 0, 0, "eDP-1", "c"]      # in front of B's top
+        self.pet.windows_changed([self.A, self.B, cover])
+        self.stand_on(400, 1000)
+        target = self.pet._jump_target()
+        self.assertTrue(target is None or target[3] != "b")
+
+    def test_he_does_it_on_his_own(self):
+        self.pet.windows_changed([self.A, self.B])
+        self.stand_on(400, 1000)
+        picks = {self.pet._pick_action() for _ in range(200)}
+        self.assertIn("window_jump", picks)
+
+
 class ClaudeHooks(unittest.TestCase):
     def setUp(self):
         random.seed(5)

@@ -100,6 +100,9 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
   feet, reachable along what he stands on, with a visible top span touching that edge to
   stand on, and a clear column beside the edge (`_column_clear()`: no window stacked above
   it, on a screen). `_climb_down_target()` does the same from the top of the window he's on
+- `_jump_target()`: from the window top he's on, another visible top across a gap of at
+  most `LEAP_GAP` cells, no more than `LEAP_UP` higher or `LEAP_DOWN` lower; he walks to
+  the edge and `_arc_to()`s across, the arc higher for a wider gap
 - `_climb_side()` moves him hand over hand beside the edge (scripted), following the
   window if it moves and falling if it goes; up top he hops in over the edge (`_arc_to`),
   going down he stops at the floor below or lets go at the bottom of the side
