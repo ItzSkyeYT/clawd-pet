@@ -141,8 +141,8 @@ you if there is one (or a terminal running `claude`, without the app).
 ### Around your desktop
 
 He roams between monitors and treats your windows as furniture: he walks along their
-tops, rides them when you move them, climbs up their sides and jumps from one to the
-next. Coming down from anywhere high, he floats down under an umbrella or a parachute.
+tops, rides them when you move them, walks straight up their sides (or throws up a rope
+and climbs it) and jumps from one to the next. Coming down from anywhere high, he floats down under an umbrella or a parachute.
 
 <table>
 <tr>
@@ -151,19 +151,23 @@ next. Coming down from anywhere high, he floats down under an umbrella or a para
 </tr>
 <tr>
 <td align="center" valign="bottom"><img src="docs/media/perch.gif" width="404" alt=""><br><sub>Hop up onto a window</sub></td>
-<td align="center" valign="bottom"><img src="docs/media/climb_window.gif" width="404" alt=""><br><sub>Climb up its side, hand over hand</sub></td>
+<td align="center" valign="bottom"><img src="docs/media/ride_window.gif" width="400" alt=""><br><sub>Ride a window you move</sub></td>
+</tr>
+<tr>
+<td align="center" valign="bottom"><img src="docs/media/climb_window.gif" width="404" alt=""><br><sub>Walk straight up its side</sub></td>
+<td align="center" valign="bottom"><img src="docs/media/climb_rope.gif" width="404" alt=""><br><sub>Or throw up a rope and climb it</sub></td>
+</tr>
+<tr>
+<td align="center" valign="bottom"><img src="docs/media/climb_down.gif" width="344" alt=""><br><sub>Walk back down, head first</sub></td>
+<td align="center" valign="bottom"><img src="docs/media/rappel.gif" width="300" alt=""><br><sub>Or rappel down</sub></td>
 </tr>
 <tr>
 <td align="center" valign="bottom"><img src="docs/media/window_jump.gif" width="392" alt=""><br><sub>Jump from window to window</sub></td>
-<td align="center" valign="bottom"><img src="docs/media/ride_window.gif" width="400" alt=""><br><sub>Ride a window you move</sub></td>
+<td align="center" valign="bottom"><img src="docs/media/ladder_window.gif" width="404" alt=""><br><sub>A ladder up to a window out of reach</sub></td>
 </tr>
 <tr>
 <td align="center" valign="bottom"><img src="docs/media/umbrella.gif" width="377" alt=""><br><sub>Float down under an umbrella</sub></td>
 <td align="center" valign="bottom"><img src="docs/media/parachute.gif" width="408" alt=""><br><sub>From higher up: skydive, then pull the cord</sub></td>
-</tr>
-<tr>
-<td align="center" valign="bottom"><img src="docs/media/climb_down.gif" width="344" alt=""><br><sub>Climb down a window's side</sub></td>
-<td align="center" valign="bottom"><img src="docs/media/ladder_window.gif" width="404" alt=""><br><sub>A ladder up to a window out of reach</sub></td>
 </tr>
 <tr>
 <td align="center" valign="bottom"><img src="docs/media/visit.gif" width="334" alt=""><br><sub>Check out a desktop icon: puzzled, a poke,<br>the magnifying glass, a verdict</sub></td>

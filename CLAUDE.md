@@ -100,8 +100,12 @@ to what Claude Code is doing.
   folders open), rummages (paper scraps fly up out of it),
   pulls out a page, puts on reading glasses and reads it like a story, reacting as he
   goes (surprised, teary, laughing, in love, scared, confused), then puts it all back
-- He walks on windows: hops up onto a window's top edge or climbs its side hand over hand
-  and pulls himself up, leaps across gaps from one window top to the next, rides a window
+- He walks on windows: hops up onto a window's top edge or goes up its side one of two
+  ways: walking straight up it like a gecko (his walk turned on its side, feet on the
+  edge, hat and all) or throwing a grappling hook onto the top and climbing the rope hand
+  over hand (each fist stays put on it while he hauls himself up), reeling it in after;
+  down, head first on foot or rappelling in bounces. Play has each way; on his own it's
+  either (`CLIMB_STYLES`). He leaps across gaps from one window top to the next, rides a window
   when you move it (even mid-climb), climbs down again or walks to the brink and hops off;
   ducks out of sight while something is fullscreen on his screen
 - **Coming down from high up** (off a window or an icon, after reading on his cloud,
@@ -157,7 +161,8 @@ to what Claude Code is doing.
 - `sprites/clawd.json`: traced frames, palette, timings, loop points. Generated, don't hand-edit
 - `sprites/extras.py`: hand-drawn extras on the same grid (hats with anchors, the stretch
   pose with its head position, mug, steam, bottles, bubbles, bats, confetti, droplets,
-  dangling from the pointer, climbing a window side and the ladder, the parachute and
+  dangling from the pointer, climbing a rope (each frame with how far he rises and where
+  his fists hold it), rappelling, the rope and its hook, the ladder, the parachute and
   umbrella with the cell his fists hold, the skydive). Plain data, parsed with `ast`,
   never imported
 - `sprites/birthday.py`: the party's art the same way (the cake lit twice to flicker and
@@ -178,6 +183,9 @@ to what Claude Code is doing.
 - Each animation stores `home`: where the idle pose sits inside it, so every animation lines up
 - Blink / look / happy / sleep faces are derived from the idle pose in `pose_rows()`,
   copying how the official art draws them (the laptop wink, the dance's ^ ^ eyes)
+- Walking up and down a window's side (`wall_up`, `wall_down`) is the official walk turned
+  a quarter by `turned_ccw()` (mirrored first to face down); hats are turned the same way
+  from the walk's own heads (`_turned_hat()`)
 - Climbing and hanging poses (`climb_rows`, `hang_rows`) are built from official parts:
   the idle body plus the arms Clawd-Jumping raises. The ladder, hearts, "!" bubble and
   Z's use the official palette

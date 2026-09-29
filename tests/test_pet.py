@@ -485,60 +485,162 @@ class ClimbingWindows(unittest.TestCase):
     def feet(self):
         return self.pet._feet()
 
+    WALL, ROPE = ("wall_up", "wall_down"), ("climb_rope", "rappel")
+
+    def style(self, name):
+        self.pet.climb_styles = {name: 1}
+
+    def drawn(self):
+        """The frame showing, on screen: (left, top, right, bottom)."""
+        _, name, idx, mirror = self.pet.frame
+        r = self.pet.frame_rect(self.pet.sp.anims[name], idx, mirror)
+        return self.pet.x + r.left(), self.pet.y + r.top(), self.pet.x + r.left() + r.width(), self.pet.y + r.top() + r.height()
+
     def climb(self, action="climb_window", ms=40_000):
-        seen, boxes = set(), []
+        """Play `action`: the frames seen, and (frame, box, drawn) on every tick he's on the side."""
+        seen, on_side = set(), []
         self.pet.play(action)
         for _ in range(int(ms / 16)):
             self.pet.advance(16)
             seen.add(self.pet.frame[1])
-            if self.pet.frame[1] in ("climb", "climb_side"):
-                boxes.append(self.pet.box_span())
+            if self.pet.frame[1] in self.WALL + self.ROPE:
+                on_side.append((self.pet.frame, self.pet.box_span(), self.drawn()))
             if self.pet.action != action and not self.pet.airborne:
                 break
-        return seen, boxes
+        return seen, on_side
 
-    def test_he_climbs_up_the_side_and_stands_on_top(self):
+    def test_he_walks_up_the_side_and_stands_on_top(self):
+        self.style("wall")
         self.pet.windows_changed([self.WIN])
         self.stand_on(250, 1530)
-        seen, boxes = self.climb()
-        self.assertTrue(seen & {"climb", "climb_side"})
+        seen, on_side = self.climb()
+        self.assertIn("wall_up", seen)
         self.assertAlmostEqual(self.feet(), 1000, delta=1)
         self.assertEqual(self.pet.standing_on, "w")
         left, right = self.pet.box_span()
         self.assertTrue(600 <= left and right <= 1100, (left, right))
-        self.assertTrue(all(r <= 601 for _, r in boxes))            # hugging the left edge, outside
+        self.assertTrue(on_side)
+        for frame, box, (l, t, r, b) in on_side:
+            self.assertAlmostEqual(r, 600, delta=1)                   # his feet on the window's edge
+            self.assertLessEqual(box[1], 601)                         # outside it
 
-    def test_he_climbs_down_the_side_too(self):
+    def test_he_walks_down_the_side_head_first(self):
+        self.style("wall")
         self.pet.windows_changed([self.WIN])
         self.stand_on(650, 1000)
-        seen, boxes = self.climb("climb_down")
-        self.assertTrue(seen & {"climb", "climb_side"})
+        seen, on_side = self.climb("climb_down")
+        self.assertIn("wall_down", seen)
         self.assertAlmostEqual(self.feet(), 1530, delta=1)
-        self.assertTrue(boxes and all(r <= 601 for _, r in boxes))
+        self.assertTrue(on_side)
+        for frame, box, (l, t, r, b) in on_side:
+            self.assertEqual(frame[1], "wall_down")
+            self.assertAlmostEqual(r, 600, delta=1)
+
+    def test_and_up_the_right_hand_side_mirrored(self):
+        self.style("wall")
+        self.pet.windows_changed([self.WIN])
+        self.stand_on(1300, 1530)
+        seen, on_side = self.climb()
+        self.assertAlmostEqual(self.feet(), 1000, delta=1)
+        for frame, box, (l, t, r, b) in on_side:
+            self.assertTrue(frame[3])                                 # mirrored: the wall on his left
+            self.assertAlmostEqual(l, 1100, delta=1)
+
+    def test_his_hat_comes_with_him_on_his_side(self):
+        self.style("wall")
+        self.pet.prefs["hat"] = "party_hat"
+        self.pet.windows_changed([self.WIN])
+        self.stand_on(250, 1530)
+        self.pet.play("climb_window")
+        self.assertTrue(run_ms(self.pet, 20_000, until=lambda: self.pet.frame[1] == "wall_up"))
+        run_ms(self.pet, 200)
+        img, rect = self.pet._hat_image()
+        self.assertTrue(self.pet._hat_turned)
+        self.assertGreater(img.width(), img.height())                 # a pointy party hat, lying on its side
+        l, t, r, b = self.drawn()
+        self.assertLess(self.pet.x + rect.x(), l + 4 * self.pet.scale)   # off his head, away from the wall
+        self.pet.grab()                                               # and it paints
+
+    def fists(self):
+        """Screen y of each fist holding the rope in the frame showing (None: free)."""
+        _, name, idx, mirror = self.pet.frame
+        anim = self.pet.sp.anims[name]
+        head = self.pet.y + self.pet.frame_rect(anim, idx, mirror).top() + anim.home[1] * self.pet.scale
+        return [None if g is None else head + g * self.pet.scale for g in self.pet.sp.climb_grip[name][idx]]
+
+    def test_up_a_rope_hand_over_hand(self):
+        self.style("rope")
+        self.pet.windows_changed([self.WIN])
+        self.stand_on(250, 1530)
+        self.pet.play("climb_window")
+        steps, glided, last, rope = [], False, None, []
+        for _ in range(int(40_000 / 16)):
+            y = self.pet.y
+            self.pet.advance(16)
+            if self.pet.frame[1] == "climb_rope":
+                if self.pet.frame != last:
+                    steps.append(self.fists())
+                elif self.pet.y != y:
+                    glided = True
+                rope.append((self.pet.rope.isVisible(), self.pet.rope.x(), self.pet.box_span()[0]))
+            last = self.pet.frame
+            if self.pet.action != "climb_window" and not self.pet.airborne:
+                break
+        self.assertFalse(glided)                                      # he moves with the frames
+        held = [(a[h], b[h]) for a, b in zip(steps, steps[1:]) for h in (0, 1) if a[h] is not None and b[h] is not None]
+        self.assertGreater(len(held), 5)
+        for a, b in held:
+            self.assertAlmostEqual(a, b, delta=0.5)                   # a fist holding the rope doesn't slide
+        s = self.pet.scale
+        for shown, rope_x, box_left in rope:
+            self.assertTrue(shown)
+            self.assertEqual(rope_x, 600 - 2 * s)                     # hanging just outside the edge...
+            self.assertEqual(box_left, 600 - 13 * s)                  # ...through his middle
+        self.assertAlmostEqual(self.feet(), 1000, delta=1)
+        self.assertEqual(self.pet.standing_on, "w")
+        self.assertFalse(self.pet.rope.isVisible())                   # reeled back in
+
+    def test_he_rappels_down_a_rope(self):
+        self.style("rope")
+        self.pet.windows_changed([self.WIN])
+        self.stand_on(650, 1000)
+        seen, on_side = self.climb("climb_down")
+        self.assertIn("rappel", seen)
+        self.assertAlmostEqual(self.feet(), 1530, delta=1)
+        self.assertFalse(self.pet.rope.isVisible())
 
     def test_the_window_moving_takes_him_along_mid_climb(self):
-        self.pet.windows_changed([self.WIN])
-        self.stand_on(250, 1530)
-        self.pet.play("climb_window")
-        self.assertTrue(run_ms(self.pet, 20_000, until=lambda: self.pet.frame[1] in ("climb", "climb_side")))
-        run_ms(self.pet, 500)
-        left, y = self.pet.box_span()[0], self.pet.y
-        moved = list(self.WIN)
-        moved[0], moved[1] = 680, 960
-        self.pet.windows_changed([moved])
-        run_ms(self.pet, 32)
-        self.assertAlmostEqual(self.pet.box_span()[0], left + 80, delta=1)
-        self.assertLess(self.pet.y, y - 30)
+        for style, frame in (("wall", "wall_up"), ("rope", "climb_rope")):
+            with self.subTest(style):
+                self.style(style)
+                self.pet.windows_changed([self.WIN])
+                self.stand_on(250, 1530)
+                self.pet.play("climb_window")
+                self.assertTrue(run_ms(self.pet, 20_000, until=lambda: self.pet.frame[1] == frame))
+                run_ms(self.pet, 500)
+                left, y, rope_x = self.pet.box_span()[0], self.pet.y, self.pet.rope.x()
+                moved = list(self.WIN)
+                moved[0], moved[1] = 680, 960
+                self.pet.windows_changed([moved])
+                run_ms(self.pet, 32)
+                self.assertAlmostEqual(self.pet.box_span()[0], left + 80, delta=1)
+                self.assertLess(self.pet.y, y - 30)
+                if style == "rope":
+                    self.assertEqual(self.pet.rope.x(), rope_x + 80)  # the rope's hooked on it too
 
     def test_the_window_going_away_mid_climb_drops_him(self):
-        self.pet.windows_changed([self.WIN])
-        self.stand_on(250, 1530)
-        self.pet.play("climb_window")
-        self.assertTrue(run_ms(self.pet, 20_000, until=lambda: self.pet.frame[1] in ("climb", "climb_side")))
-        run_ms(self.pet, 1500)
-        self.pet.windows_changed([])
-        self.assertTrue(run_ms(self.pet, 8000, until=lambda: not self.pet.airborne and self.feet() > 1520))
-        self.assertAlmostEqual(self.feet(), 1530, delta=1)
+        for style, frame in (("wall", "wall_up"), ("rope", "climb_rope")):
+            with self.subTest(style):
+                self.style(style)
+                self.pet.windows_changed([self.WIN])
+                self.stand_on(250, 1530)
+                self.pet.play("climb_window")
+                self.assertTrue(run_ms(self.pet, 20_000, until=lambda: self.pet.frame[1] == frame))
+                run_ms(self.pet, 1000)
+                self.pet.windows_changed([])
+                self.assertTrue(run_ms(self.pet, 8000, until=lambda: not self.pet.airborne and self.feet() > 1520))
+                self.assertAlmostEqual(self.feet(), 1530, delta=1)
+                self.assertFalse(self.pet.rope.isVisible())
 
     def test_not_up_an_edge_hidden_behind_another_window(self):
         cover = [450, 900, 300, 700, 5, 0, 0, "eDP-1", "c"]             # over the left edge
@@ -936,13 +1038,13 @@ class PlayWithAGoal(unittest.TestCase):
     def test_climb_a_side_that_starts_high_up(self):
         self.at(1400)
         stood, frames, layers, ladder = self.play("climb_window")
-        self.assertIn("climb_side", frames)
+        self.assertTrue(set(frames) & {"wall_up", "climb_rope"}, frames)
         self.assertIn(stood[-1], ("a", "c"))
 
     def test_climb_down_from_the_floor(self):
         self.at(1400)
         stood, frames, layers, ladder = self.play("climb_down")
-        self.assertIn("climb_side", frames)
+        self.assertTrue(set(frames) & {"wall_down", "rappel"}, frames)
         self.assertTrue(any(w in ("a", "c") for w in stood), stood)
         self.assertIsNone(stood[-1])
 
@@ -1059,18 +1161,22 @@ class PlayWithAGoal(unittest.TestCase):
         self.assertLess(climbing, (cp.LADDER_TIME + 0.5) * 1000)
 
     def test_a_tall_side_is_climbed_briskly(self):
-        self.pet.windows_changed([[600, 450, 500, 1080, 3, 0, 0, "eDP-1", "t"]])   # 1080 px of side
-        self.at(1200)
-        self.pet.play("climb_window")
-        climbing = 0
-        for _ in range(int(60_000 / 16)):
-            self.pet.advance(16)
-            if self.pet.frame[1] == "climb_side":
-                climbing += 16
-            if self.pet.action != "climb_window":
-                break
-        self.assertEqual(self.pet._window_under()[3], "t")
-        self.assertLess(climbing, (cp.LADDER_TIME + 0.5) * 1000)
+        for style in ("wall", "rope"):
+            with self.subTest(style):
+                self.pet.climb_styles = {style: 1}
+                self.pet.windows_changed([[600, 450, 500, 1080, 3, 0, 0, "eDP-1", "t"]])   # 1080 px of side
+                self.at(1200)
+                self.pet.play("climb_window")
+                climbing = 0
+                for _ in range(int(60_000 / 16)):
+                    self.pet.advance(16)
+                    if self.pet.frame[1] in ("wall_up", "climb_rope"):
+                        climbing += 16
+                    if self.pet.action != "climb_window":
+                        break
+                self.assertEqual(self.pet._window_under()[3], "t")
+                self.assertGreater(climbing, 1000)
+                self.assertLess(climbing, (cp.LADDER_TIME + 0.5) * 1000)
 
     def test_with_nothing_to_do_it_with_he_looks_puzzled(self):
         self.pet.windows_changed([])
@@ -2325,6 +2431,12 @@ class TimeAndSeasons(unittest.TestCase):
                 for mirror in (False, True):
                     self.pet.frame = ("anim", name, i, mirror)
                     got = self.pet._hat_image()
+                    if getattr(a, "turned", None):                 # on his side, the hat turned with him
+                        self.assertIsNotNone(got, (name, i))
+                        _, r = got
+                        self.assertTrue(0 <= r.left() and r.right() < self.pet.width()
+                                        and 0 <= r.top() and r.bottom() < self.pet.height(), (name, i, mirror, r))
+                        continue
                     if head is None:
                         self.assertIsNone(got)
                         continue

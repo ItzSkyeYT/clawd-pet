@@ -103,11 +103,17 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
 - `_jump_target()`: from the window top he's on, another visible top across a gap of at
   most `LEAP_GAP` cells, no more than `LEAP_UP` higher or `LEAP_DOWN` lower; he walks to
   the edge and `_arc_to()`s across, the arc higher for a wider gap
-- `_climb_side()` moves him hand over hand beside the edge (scripted), following the
-  window if it moves and falling if it goes; up top he hops in over the edge (`_arc_to`),
-  going down he stops at the floor below or lets go at the bottom of the side. The side
-  and ladder climbs cycle through however many frames the art has (four now, played
-  backwards going down)
+- Up or down a window's side, two ways (`_climb_style()`, weighted by `CLIMB_STYLES`; Play
+  has each): `_walk_up()` / `_walk_down()` walk him up the side on his feet (`wall_up`,
+  `wall_down`: the walk turned on its side, his feet on the edge, the hat turned with him),
+  up until he's half past the top, then a hop in over it; down head first from the brink,
+  flipping onto his feet at the floor. `_rope_up()` throws the grappling hook onto the top
+  (the rope is a second `Prop`, drawn to length by `rope_rows()`, hanging just outside the
+  edge through his middle) and climbs `climb_rope` hand over hand: he moves only when the
+  frame changes, by its `rise`, so a fist holding the rope (`grip`) stays put; on top it's
+  reeled in. `_rappel()` hooks it on, drops it, and slides down in bounces (`rappel`), then
+  shakes it loose. All of them follow the window if it moves (`_follow()`, rope included),
+  fall if it goes, and take no more than `LADDER_TIME` however tall the side
 
 ## Coming down softly
 - `_come_down(vx, vy)` replaces the plain drop off a window (`_act_hop_down`, after

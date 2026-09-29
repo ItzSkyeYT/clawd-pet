@@ -105,6 +105,8 @@ LABELS = {
     "celebrate": "Celebrating (Claude Code done)",
     "perch_window": "Hop up onto a window", "hop_down": "Hop down from a window",
     "climb_window": "Climb up the side of a window", "climb_down": "Climb down the side of a window",
+    "walk_up_window": "Walk up the side of a window", "rope_up_window": "Climb a rope up a window",
+    "walk_down_window": "Walk down the side of a window", "rappel_down_window": "Rappel down a window",
     "window_jump": "Jump to another window",
     "yawn": "Yawn and stretch", "morning": "Good morning (stretch and coffee)", "coffee": "Coffee",
     "birthday": "Birthday party",
@@ -116,12 +118,13 @@ LIVELY = ("dance", "race", "sparkler", "jump", "jump_happy", "cloud")   # calmer
 BOUNCY = {"walk", "dance", "jump", "jump_happy", "celebrate", "race", "wave"}   # a hat's pom-pom swings
 PARTIES = ("celebrate", "new_year", "birthday")   # celebrations: the party hat, confetti
 HAT_SWAP = (220, 340)         # ms: a changed hat's old one lifts off, then the new one drops on
-AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["perch_window", "hop_down", "climb_window", "climb_down", "window_jump",
-                                        "visit", "read"]
+AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["perch_window", "hop_down", "walk_up_window", "rope_up_window",
+                                        "walk_down_window", "rappel_down_window", "window_jump", "visit", "read"]
 CLAUDE_PREVIEWS = ["work", "attention", "celebrate"]
 TIME_SCENES = ["yawn", "morning", "coffee", "birthday", "remind_break", "remind_water"]
 POINTER_SCENES = ["grab"]
-PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + TIME_SCENES + POINTER_SCENES + ["idle"])
+PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + TIME_SCENES + POINTER_SCENES
+               + ["idle", "climb_window", "climb_down"])       # those two: either way, at random
 
 EXTRAS_FILE = os.path.join(HERE, "sprites", "extras.py")
 BIRTHDAY_FILE = os.path.join(HERE, "sprites", "birthday.py")
@@ -285,10 +288,12 @@ LADDER_PALETTE = {"d": RAIL_DARK, "l": RAIL_LIGHT}
 
 CURSOR_NEAR = 70              # sprite pixels: how close the pointer must be for him to watch it
 CLIMB_JUMP = 20               # cells: a window's side ending this far above his feet, he jumps up to
+CLIMB_STYLES = {"wall": 3, "rope": 2}   # up or down a window's side: walking it (likelier) or on a rope
+ROPE_THROW_MS = 420           # the grappling hook's flight up onto a window's top
+RAPPEL_DROP = 10              # cells he slides down the rope between brakes
 LEAP_GAP = 80                 # cells: how far across he'll jump to another window top...
 LEAP_UP = 50                  # ...at most this much higher...
 LEAP_DOWN = 150               # ...or this much lower
-WINDOW_CLIMB = 1.3            # up a window's side a little quicker than a ladder
 GLANCE_MS = 1400
 ARMS_UP = ("anim", "jump", 2, False)   # a folder is being dragged over him: "for me?"
 GRAB_REACH = 45               # cells above his head he'll jump up to the pointer from
@@ -711,6 +716,19 @@ def hang_rows(idle):
     return ["".join(r) for r in rows]
 
 
+def turned_ccw(rows):
+    """Grid rows turned a quarter anticlockwise: the right side ends up on top,
+    the bottom on the right (his walk turned so he walks up a wall on his right)."""
+    h, w = len(rows), len(rows[0])
+    return ["".join(rows[y][w - 1 - x] for y in range(h)) for x in range(w)]
+
+
+def rope_rows(height, art):
+    """A rope `height` cells long under its grappling hook (extras' "rope")."""
+    twist = art["twist"]
+    return list(art["hook"]) + [twist[y % len(twist)] for y in range(max(0, height))]
+
+
 def ladder_rows(height):
     rows = []
     for y in range(height):
@@ -840,15 +858,40 @@ class Sprites:
         lean = dg_frames[LEAN_2]
         cells = [x for r in lean for x, c in enumerate(r) if c != "."]
         self.dangle_lean = 1 if sum(cells) / max(1, len(cells)) >= grip[0] + 1 else -1
-        # Climbing: up a window's side (the edge along his right, mirrored for the
-        # other side) and up the ladder between screens
-        for name in ("climb_side", "climb_ladder"):
+        # Climbing: up a rope on a window's side, rappelling down it, and up the
+        # ladder between screens. The rope climb's frames say how far he rises
+        # arriving at each, and where each fist holds the rope.
+        self.climb_rows, self.climb_rise, self.climb_grip = {}, {}, {}
+        for name in ("climb_rope", "rappel", "climb_ladder"):
             if name in extras:
                 cs = extras[name]
+                ms = cs.get("ms", [140] * len(cs["frames"]))
                 self.anims[name] = Anim(name, {
                     "size": [len(cs["frames"][0][0]), len(cs["frames"][0])], "home": cs["home"],
-                    "frames": [{"ms": 140, "rows": rows} for rows in cs["frames"]]},
+                    "frames": [{"ms": m, "rows": rows} for m, rows in zip(ms, cs["frames"])]},
                     {k: rgb(v) for k, v in cs["palette"].items()})
+                self.climb_rows[name] = cs["frames"]
+                if "rise" in cs:
+                    self.climb_rise[name] = cs["rise"]
+                if "grip" in cs:
+                    self.climb_grip[name] = cs["grip"]
+        self.rope_art = extras.get("rope")          # its hook and twist, drawn to length by rope_rows()
+        # Walking up a window's side, and head first down it: his own crab-walk
+        # turned a quarter anticlockwise, feet on the edge along his right (mirrored
+        # for a window on his left). Down is the walk mirrored first, so he faces
+        # down. His feet sit on the idle box's right edge and the frame's foot on its
+        # floor; a hat turns with him (turned_hat), from the walk's own heads.
+        wk = data["animations"]["walk"]
+        lo, hi = wk["loop"]
+        ww, wh = wk["size"]
+        for name, flip in (("wall_up", False), ("wall_down", True)):
+            src = [wk["frames"][i] for i in range(lo, hi + 1)]
+            a = Anim(name, {"size": [wh, ww], "home": [wh - self.iw, ww - self.ih], "loop": [0, len(src) - 1],
+                            "frames": [{"ms": f["ms"], "rows": turned_ccw([r[::-1] for r in f["rows"]] if flip else f["rows"])}
+                                       for f in src]}, palette)
+            a.heads = [None] * len(src)
+            a.turned = {"heads": [self.anims["walk"].heads[i] for i in range(lo, hi + 1)], "src_w": ww, "flip": flip}
+            self.anims[name] = a
         # Floating down: the parachute and umbrella, held by their anchor in his
         # fists (the dangle grip), and a skydiving pose
         self.held = {}
@@ -899,6 +942,19 @@ class Sprites:
         # nightcap_stretch: the nightcap with its tail flipped up, out of the left arm's way
         self.hats = {n: (images(n), tuple(extras[n]["anchor"])) for n in list(HATS) + ["nightcap_stretch"]}
         self.hats_flipped = {n: [flipped(img) for img in frames] for n, (frames, _) in self.hats.items()}
+
+        def turned_hat(name, flip):
+            e = extras[name]
+            pal = {k: rgb(v) for k, v in e["palette"].items()}
+            return [grid_image(turned_ccw([r[::-1] for r in rows] if flip else rows), pal) for rows in e["frames"]]
+        # ...and turned with him when he walks up (unflipped) or down (flipped) a window's side
+        self.hats_turned = {}
+        for n in self.hats:
+            for flip in (False, True):
+                imgs = turned_hat(n, flip)
+                self.hats_turned.setdefault(n, {})[flip, False] = imgs
+                self.hats_turned[n][flip, True] = [flipped(img) for img in imgs]
+        self.rope_pal = {k: rgb(v) for k, v in self.rope_art["palette"].items()} if self.rope_art else {}
         for name in ("mug", "water_bottle", "break_bubble", "water_bubble"):
             self.props[name] = images(name)[0]
         self.props["mug_held"] = flipped(self.props["mug"])         # handle toward his hand
@@ -2055,6 +2111,7 @@ class ClawdPet(QWidget):
         self.prefs = Prefs(settings)
         self.wall = wall_clock                 # the date and time (tests set their own)
         self._hat_on = False                   # is a hat drawn on this frame
+        self._hat_turned = False               # ...on its side, with him
         self._hat_now = "unset"                # the hat that's on his head (not mid-change)
         self._hat_swap = None                  # (old, new, since, sparkled) while it changes
         self._hat_lift, self._hat_alpha = 0.0, 1.0
@@ -2118,6 +2175,9 @@ class ClawdPet(QWidget):
         self._shown = None
         self._mask = None
         self.ladder = Prop()
+        self.rope = Prop()                     # the grappling hook's rope, down a window's side
+        self._rope_key = None
+        self.climb_styles = dict(CLIMB_STYLES)
         self.icon_source = desktop_icons
         self.window_list = []          # other apps' windows, from KWin (dicts)
         self.standing_on = None        # id of the window whose top he's standing on
@@ -2450,6 +2510,8 @@ class ClawdPet(QWidget):
         self.scripted = False
         if self.ladder.isVisible():
             self.ladder.hide()                  # interrupted mid-climb: pack it away
+        if self.rope.isVisible():
+            self.rope.hide()
         keep = {"heart"}
         if self.reminding and action not in ("attention", "grab", "duck"):
             keep |= REMINDER_BITS                # a reminder stays up until you press Done
@@ -2801,7 +2863,7 @@ class ClawdPet(QWidget):
         return {"action": self.action, "frame": list(self.frame), "box_left": round(left),
                 "feet": round(self._feet()), "screen": [geo.left(), geo.top(), geo.width(), geo.height()],
                 "mode": self.claude_mode(), "cursor": list(self.cursor) if self.cursor else None,
-                "ladder": self.ladder.isVisible(), "scale": self.scale,
+                "ladder": self.ladder.isVisible(), "rope": self.rope.isVisible(), "scale": self.scale,
                 "windows": len(self.window_list), "standing_on": self.standing_on, "ducked": self.ducked,
                 "ledges": sum(1 for sf in self._surfaces() if sf[3] is not None),
                 "catcher": None if self.catcher is None else
@@ -3185,14 +3247,34 @@ class ClawdPet(QWidget):
             QRegion(head_left * s, top * s, HEAD_W * s, 4 * s))
         return region.translated(at)
 
+    def _turned_hat(self, key, anim, kind, ax, ay):
+        """His hat while he's on his side (walking up or down a window): put on
+        the walk frame the turned frame was made from, then given the same quarter
+        turn (flipped first when the frame was), and mirrored with it."""
+        cx, top = anim.turned["heads"][kind[2]]
+        width, flip = anim.turned["src_w"], anim.turned["flip"]
+        img = self.sp.hats_turned[key[0]][flip, kind[3]][key[1]]
+        hw = img.height()                                   # the hat's width, upright
+        left = width - (cx - ax) - hw if flip else cx - ax  # upright, in the walk frame
+        x, y = top - ay, width - left - hw
+        s = self.scale
+        lift = int(round(self._hat_lift * s))               # "up" off his head is sideways now
+        if kind[3]:
+            x, lift = anim.w - x - img.width(), -lift
+        self._hat_on = self._hat_turned = True
+        at = self._frame_pos(kind)
+        return img, QRect(at.x() + x * s - lift, at.y() + y * s, img.width() * s, img.height() * s)
+
     def _hat_image(self):
         key = self._hat_key()
-        self._hat_on = False
+        self._hat_on = self._hat_turned = False
         if key is None:
             return None
         frames, (ax, ay) = self.sp.hats[key[0]]
         img = frames[key[1]]
         kind = self.frame
+        if kind[0] == "anim" and getattr(self.sp.anims[kind[1]], "turned", None):
+            return self._turned_hat(key, self.sp.anims[kind[1]], kind, ax, ay)
         head, w, mirror = self._head()
         if head is None:
             return None
@@ -3287,7 +3369,7 @@ class ClawdPet(QWidget):
             p.drawImage(r, img)
             if hat:
                 p.setOpacity(1.0)
-            if hat:
+            if hat and not self._hat_turned:
                 # arms raised past his head come up in front of the hat's brim
                 p.save()
                 p.setClipRegion(self._reaching_up())
@@ -5139,10 +5221,31 @@ class ClawdPet(QWidget):
         self.pose("happy")
         yield 500
 
-    def _act_climb_window(self, target=None):
-        """Walk to the side of a window and climb it, hand over hand up its
-        edge, then pull himself up onto the top. Asked for, he'll leap for a
-        side that starts high up, or go to the screen that has one."""
+    def _climb_style(self, style=None):
+        """How he goes up or down a window's side this time: "wall" (walking it)
+        or "rope" (a grappling hook), weighted by climb_styles."""
+        if style:
+            return style
+        return random.choices(list(self.climb_styles), weights=list(self.climb_styles.values()))[0]
+
+    def _act_walk_up_window(self):
+        yield from self._act_climb_window(style="wall")
+
+    def _act_rope_up_window(self):
+        yield from self._act_climb_window(style="rope")
+
+    def _act_walk_down_window(self):
+        yield from self._act_climb_down(style="wall")
+
+    def _act_rappel_down_window(self):
+        yield from self._act_climb_down(style="rope")
+
+    def _act_climb_window(self, target=None, style=None):
+        """Up the side of a window and onto its top: walking straight up it, feet
+        on the edge, or throwing a grappling hook onto the top and climbing the
+        rope hand over hand. Asked for, he'll leap for a side that starts high up
+        (a rope reaches down anyway), or go to the screen that has one."""
+        style = self._climb_style(style)
         target = target or self._climb_target()
         if target is None and self.manual:
             yield from self._get_down()
@@ -5155,47 +5258,61 @@ class ClawdPet(QWidget):
             yield from self._shrug()
             return
         wid, side, box = target
-        yield from self._walk_to(box)
-        self.set_box_left(box)
+        win = self._window(wid)
+        if win is None:
+            return
+        s = self.scale
+        stand = self._on_rope(self._edge(win, side), side) if style == "rope" else box
+        yield from self._walk_to(stand)
+        self.set_box_left(stand)
         self.pose("look_r" if side < 0 else "look_l")      # sizing it up
         yield 450
         win = self._window(wid)
         if win is None:
             return
-        s = self.scale
         self.scripted = True
-        bottom = win["y"] + win["h"]
-        if bottom < self._feet():                           # the side starts above him: jump for it
-            self.show_frame("jump", 1)
-            yield 140
-            self.show_frame("jump", 2)
-            rise = self._feet() - bottom + self.ih * s / 2
-            if rise <= 1.5 * CLIMB_JUMP * s:
-                for k in range(1, 9):
-                    self.y -= rise / 8
-                    yield TICK_MS
-            else:                                           # a proper leap up to it
-                yield from self._arc_to(box, bottom - self.ih * s / 2, 3 * s, hold=True)
-            win = self._window(wid)
-            if win is None:
-                yield from self._come_down()
-                return
-        done = yield from self._climb_side(wid, side, up=True)
+        if style == "rope":
+            done = yield from self._rope_up(wid, side)
+        else:
+            bottom = win["y"] + win["h"]
+            if bottom < self._feet():                       # the side starts above him: jump for it
+                self.show_frame("jump", 1)
+                yield 140
+                self.show_frame("jump", 2)
+                rise = self._feet() - bottom + self.ih * s / 2
+                if rise <= 1.5 * CLIMB_JUMP * s:
+                    for k in range(1, 9):
+                        self.y -= rise / 8
+                        yield TICK_MS
+                else:                                       # a proper leap up to it
+                    yield from self._arc_to(box, bottom - self.ih * s / 2, 3 * s, hold=True)
+                if self._window(wid) is None:
+                    yield from self._come_down()
+                    return
+            done = yield from self._walk_up(wid, side)
         if not done:
             return
         win = self._window(wid)
-        edge = win["x"] if side < 0 else win["x"] + win["w"]
+        if win is None:                                     # gone just as he got there
+            self.rope.hide()
+            yield from self._come_down()
+            return
+        edge = self._edge(win, side)
         inward = edge + 2 * s if side < 0 else edge - self.iw * s - 2 * s
         self.show_frame("jump", 2)                          # and over the top
-        yield from self._arc_to(inward, win["y"], 3 * s)
+        yield from self._arc_to(inward, win["y"], 2 * s)
         yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
+        if style == "rope":                                 # and the rope back up after him
+            self.pose("happy")
+            yield from self._rope_away(up=True)
         self.pose("happy")
         yield 500
 
-    def _act_climb_down(self):
-        """Down the side of the window he's on: along to its end, over the edge,
-        and hand over hand down its side, dropping off the bottom if it stops
-        short of the floor. Asked for from the floor, he gets up there first."""
+    def _act_climb_down(self, style=None):
+        """Down the side of the window he's on: along to its end, then head first
+        down its side on foot, or a rope hooked on the top and a rappel down it.
+        Asked for from the floor, he gets up there first."""
+        style = self._climb_style(style)
         if self._window_under() is None:
             if not self.manual or not (yield from self._up_onto_window()):
                 yield from self._shrug()
@@ -5212,57 +5329,249 @@ class ClawdPet(QWidget):
         self.pose("look_l" if side < 0 else "look_r")      # peering over the edge
         yield 500
         self.scripted = True
-        self.set_box_left(box)                              # over the edge, holding on
-        yield from self._climb_side(wid, side, up=False, goal=self._floor_below(box))
-
-    def _climb_side(self, wid, side, up, goal=None):
-        """Hand over hand up (or down) beside a window's side, moving with the
-        window if it's moved. Down, stops at `goal` (feet) or the bottom of the
-        side, then lets go. If the window goes, he falls. True if he made it."""
-        s = self.scale
-        win = self._window(wid)
-        last = (win["x"], win["y"]) if win else None
-        k = 0
-        base = CLIMB_SPEED * WINDOW_CLIMB * s             # a tall side goes quicker, like a tall ladder
-        if win is not None:
-            to_go = self._feet() - win["y"] if up else (goal if goal is not None else win["y"] + win["h"]) - self._feet()
-            speed = max(base, abs(to_go) / LADDER_TIME)
+        goal = self._floor_below(box)
+        if style == "rope":
+            yield from self._rappel(wid, side, goal)
         else:
-            speed = base
-        per_step = max(4, round(8 * base / speed))
+            yield from self._walk_down(wid, side, box, goal)
+
+    def _edge(self, win, side):
+        """The x of the window's side he's at (side < 0: its left side, the window on his right)."""
+        return win["x"] if side < 0 else win["x"] + win["w"]
+
+    def _rope_x(self, edge, side):
+        """Where the rope hangs: 2 cells wide, just outside the window's edge."""
+        return edge - 2 * self.scale if side < 0 else edge
+
+    def _on_rope(self, edge, side):
+        """His box's left with the rope through his middle (idle columns 11-12)."""
+        return self._rope_x(edge, side) - 11 * self.scale
+
+    def _follow(self, wid, last):
+        """One tick along with window `wid` (and the rope hooked on it): its new
+        (x, y), or None if it's gone."""
+        w = self._window(wid)
+        if w is None:
+            return None
+        if (w["x"], w["y"]) != last:
+            dx, dy = w["x"] - last[0], w["y"] - last[1]
+            self.x += dx
+            self.y += dy
+            if self.rope.isVisible():
+                self.rope.move(self.rope.x() + int(round(dx)), self.rope.y() + int(round(dy)))
+        return w["x"], w["y"]
+
+    def _walk_up(self, wid, side):
+        """Straight up the window's side on foot (his walk turned on its side, feet
+        on the edge), moving with the window, until he's half past its top. False
+        if the window went (he falls)."""
+        s = self.scale
+        a = self.sp.anims["wall_up"]
+        win = self._window(wid)
+        last = (win["x"], win["y"])
+        speed = max(WALK_SPEED * s, (self._feet() - win["y"] - a.h * s / 2) / LADDER_TIME)
+        tempo = WALK_TEMPO * WALK_SPEED * s / speed          # a tall side: quicker steps too
+        self.show_frame("jump", 1)                          # a crouch, and onto the wall
+        yield 120
+        i = 0
         while True:
-            win = self._window(wid)
-            if win is None:                                 # gone: nothing to hold on to
-                yield from self._come_down()
-                return False
-            if (win["x"], win["y"]) != last:                # moved: along with it
-                self.x += win["x"] - last[0]
-                self.y += win["y"] - last[1]
-                last = (win["x"], win["y"])
-            feet = self._feet()
-            if up and feet <= win["y"]:
-                return True
-            if not up and (feet >= (goal if goal is not None else feet)
-                           or feet - self.ih * s / 2 >= win["y"] + win["h"]):
-                self.scripted = False                       # down (or off the bottom: drop the rest)
-                if self.y < self.ground_y() - 1:
+            self.show_frame("wall_up", i % len(a.frames), side > 0)
+            t, ms = 0.0, a.ms[i % len(a.frames)] * tempo
+            while t < ms:
+                yield TICK_MS
+                t += TICK_MS
+                last = self._follow(wid, last)
+                if last is None:
                     yield from self._come_down()
-                else:
-                    self.y = self.ground_y()
-                    self.pose("idle")
-                return True
-            if k % per_step == 0:                           # the edge beside him (or the ladder frames)
-                name = "climb_side" if "climb_side" in self.sp.anims else "climb"
-                steps = len(self.sp.anims[name].frames)
-                n = k // per_step
-                step = n % steps if up else (-n - 1) % steps   # down: the cycle backwards
-                self.show_frame(name, step, name == "climb_side" and side > 0)
-            k += 1
-            step = speed * TICK_MS / 1000
-            self.y += -step if up else step
-            if not up and goal is not None:
-                self.y = min(self.y, goal - self.home_px.y() - self.ih * s)
+                    return False
+                self.y -= speed * TICK_MS / 1000
+                if self._feet() <= last[1] + a.h * s / 2:
+                    return True
+            i += 1
+
+    def _walk_down(self, wid, side, box, goal):
+        """Over the edge and head first down the window's side on foot, moving
+        with the window; at the bottom he flips back onto his feet, or where the
+        side stops short of the floor, lets go. True if he made it."""
+        s = self.scale
+        a = self.sp.anims["wall_down"]
+        win = self._window(wid)
+        self.show_frame("jump", 2)                          # over the edge, his back end at the top
+        yield from self._arc_to(box, win["y"] + a.h * s, 2 * s, hold=True)
+        win = self._window(wid)
+        if win is None:
+            yield from self._come_down()
+            return False
+        last = (win["x"], win["y"])
+        bottom = goal if goal is not None else win["y"] + win["h"]
+        speed = max(WALK_SPEED * s, (bottom - self._feet()) / LADDER_TIME)
+        tempo = WALK_TEMPO * WALK_SPEED * s / speed
+        i = 0
+        while True:
+            self.show_frame("wall_down", i % len(a.frames), side > 0)
+            t, ms = 0.0, a.ms[i % len(a.frames)] * tempo
+            while t < ms:
+                yield TICK_MS
+                t += TICK_MS
+                old = last
+                last = self._follow(wid, last)
+                if last is None:
+                    yield from self._come_down()
+                    return False
+                bottom += last[1] - old[1] if goal is None else 0
+                self.y += speed * TICK_MS / 1000
+                w = self._window(wid)
+                if self._feet() - a.h * s / 2 >= w["y"] + w["h"]:
+                    yield from self._come_down()            # the side stops short: let go
+                    return True
+                if self._feet() >= bottom:
+                    self.y -= self._feet() - bottom
+                    self.show_frame("jump", 2)              # and back onto his feet
+                    yield from self._arc_to(self.box_span()[0], bottom, 3 * s)
+                    yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
+                    return True
+            i += 1
+
+    def _rope_hang(self, x, top, bottom, mirror, shown=None, from_top=True, tip=None):
+        """The rope: its hook's top at `top` (screen y), hanging down to `bottom`,
+        just outside the window's edge at `x` (the hook reaching over onto the
+        top). `shown`: how much of it shows (0-1), from the hook down or, with
+        from_top False, from the bottom up. `tip`: the hook's top while it's still
+        flying up there, the rope trailing down to `bottom`."""
+        s = self.scale
+        cells = max(1, int(round((bottom - top) / s)) - len(self.sp.rope_art["hook"]))
+        key = (cells, mirror, s)
+        if key != self._rope_key:
+            img = grid_image(rope_rows(cells, self.sp.rope_art), self.sp.rope_pal)
+            img = flipped(img) if mirror else img
+            self.rope.image = QPixmap.fromImage(img.scaled(img.width() * s, img.height() * s,
+                                                           Qt.AspectRatioMode.IgnoreAspectRatio,
+                                                           Qt.TransformationMode.FastTransformation))
+            self._rope_key = key
+        pm = self.rope.image
+        left = x - (pm.width() - 2 * s) if mirror else x
+        up = top if tip is None else tip
+        self.rope.setGeometry(int(left), int(round(up)), pm.width(), max(1, int(round(bottom - up))))
+        self.rope.reveal = 1.0 if shown is None else shown
+        self.rope.from_top = from_top
+        if not self.rope.isVisible():
+            self.rope.show()
+            self.raise_()                                   # he's in front of it
+        self.rope.update()
+
+    def _rope_away(self, up):
+        """The rope gone again: reeled up to its hook (he's on the top), or
+        shaken loose and fallen in a heap (he's at the bottom)."""
+        for k in range(9, -1, -1):
+            self.rope.reveal = k / 10
+            self.rope.from_top = up
+            self.rope.update()
+            yield 35
+        self.rope.hide()
+
+    def _rope_up(self, wid, side):
+        """Throw the grappling hook onto the window's top, then climb the rope
+        hand over hand: a fist holding the rope stays put on it while he hauls
+        himself up under it. True once his hands are up at the top."""
+        s = self.scale
+        mirror = side > 0
+        a = self.sp.anims["climb_rope"]
+        rises, grips = self.sp.climb_rise["climb_rope"], self.sp.climb_grip["climb_rope"]
+        win = self._window(wid)
+        x = self._rope_x(self._edge(win, side), side)
+        floor = self._feet()
+        top = win["y"] - len(self.sp.rope_art["hook"]) * s
+        self.show_frame("jump", 1)                          # the throw: a crouch...
+        yield 150
+        self.show_frame("jump", 3)                          # ...and up it goes, the rope trailing
+        start = self._feet() - (self.ih + 4) * s
+        steps = max(1, round(ROPE_THROW_MS / TICK_MS))
+        for k in range(1, steps + 1):
+            u = k / steps
+            self._rope_hang(x, top, floor, mirror, tip=start + (top - start) * (1 - (1 - u) ** 2))
             yield TICK_MS
+        win = self._window(wid)
+        if win is None:
+            self.rope.hide()
+            yield from self._come_down()
+            return False
+        last = (win["x"], win["y"])                         # (it may have moved while the hook flew)
+        self._rope_hang(self._rope_x(self._edge(win, side), side), win["y"] - len(self.sp.rope_art["hook"]) * s,
+                        floor, mirror)
+        yield 150                                           # clack: it's caught
+        tempo = max(1.0, (floor - win["y"]) / s / sum(rises) * sum(a.ms) / (LADDER_TIME * 1000))
+        i = 0
+        while True:
+            k = i % len(a.frames)
+            head = self._feet() - self.ih * s - rises[k] * s
+            if head + min(g for g in grips[k] if g is not None) * s < last[1]:
+                return True                                 # his next hold would be past the top: he's there
+            self.y -= rises[k] * s
+            self.show_frame("climb_rope", k, mirror)
+            t, ms = 0.0, max(TICK_MS, a.ms[k] / tempo)
+            while t < ms:
+                yield TICK_MS
+                t += TICK_MS
+                last = self._follow(wid, last)
+                if last is None:
+                    self.rope.hide()
+                    yield from self._come_down()
+                    return False
+            i += 1
+
+    def _rappel(self, wid, side, goal):
+        """From the brink: the hook on the window's top, the rope dropped down its
+        side, out onto it and down in bounces, braking between slides; at the
+        bottom, the rope shaken loose. True if he made it down."""
+        s = self.scale
+        mirror = side > 0
+        win = self._window(wid)
+        edge = self._edge(win, side)
+        x = self._rope_x(edge, side)
+        bottom = goal if goal is not None else win["y"] + win["h"]
+        top = win["y"] - len(self.sp.rope_art["hook"]) * s
+        for k in range(1, 11):                              # the hook goes on, the rope drops
+            self._rope_hang(x, top, bottom, mirror, shown=k / 10)
+            yield 30
+        # out onto it, fists just under the hook (the braking frame holds on 6 rows above his head)
+        self.show_frame("jump", 2)
+        yield from self._arc_to(self._on_rope(edge, side), win["y"] + (6 + self.ih) * s, 2 * s, hold=True)
+        win = self._window(wid)
+        if win is None:
+            self.rope.hide()
+            yield from self._come_down()
+            return False
+        last = (win["x"], win["y"])
+        self.show_frame("rappel", 0, mirror)
+        yield 250
+        while self._feet() < bottom - 0.5:
+            drop = min(bottom - self._feet(), RAPPEL_DROP * s)
+            self.show_frame("rappel", 1, mirror)            # wheee
+            for _ in range(8):
+                yield TICK_MS
+                old = last
+                last = self._follow(wid, last)
+                if last is None:
+                    self.rope.hide()
+                    yield from self._come_down()
+                    return False
+                bottom += last[1] - old[1] if goal is None else 0
+                self.y += drop / 8
+            self.show_frame("rappel", 0, mirror)            # brake
+            t = 0
+            while t < 200 and self._feet() < bottom - 0.5:
+                yield TICK_MS
+                t += TICK_MS
+                last = self._follow(wid, last)
+                if last is None:
+                    self.rope.hide()
+                    yield from self._come_down()
+                    return False
+        self.y -= self._feet() - bottom
+        self.scripted = False
+        yield from self._play("jump", range(8, len(self.sp.anims["jump"].frames)))
+        yield from self._rope_away(up=False)                # a flick, and it comes loose
+        return True
 
     def _act_hop_down(self):
         """Walk to whichever end of the window he's on is nearer, and hop off it

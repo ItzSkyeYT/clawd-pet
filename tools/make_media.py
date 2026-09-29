@@ -121,8 +121,9 @@ class Stage:
         mask = getattr(pet, "_mask", None)
         body = mask.boundingRect() if mask is not None and not mask.isEmpty() else pet.rect()
         box = body.translated(int(pet.x), int(pet.y))
-        if pet.ladder.isVisible():
-            box = box.united(pet.ladder.geometry())
+        for prop in (pet.ladder, pet.rope):
+            if prop.isVisible():
+                box = box.united(prop.geometry())
         if self.show_cursor and pet.cursor is not None:
             box = box.united(QRect(int(pet.cursor[0]) - 4, int(pet.cursor[1]) - 4, 24, 30))
         self.boxes.append(box)
@@ -145,12 +146,12 @@ class Stage:
             draw_window(p, QRect(w["x"], w["y"], w["w"], w["h"]))
         for name, rect, is_dir in self.icons:
             draw_icon(p, name, rect, is_dir)
-        lad = self.pet.ladder
-        if lad.isVisible() and lad.image is not None:
-            g = lad.geometry()
-            shown = int(g.height() * lad.reveal)
-            top = 0 if lad.from_top else g.height() - shown
-            p.drawPixmap(g.x(), g.y() + top, lad.image, 0, top, g.width(), shown)
+        for prop in (self.pet.ladder, self.pet.rope):   # his own overlays, as Prop paints them
+            if prop.isVisible() and prop.image is not None:
+                g = prop.geometry()
+                shown = int(g.height() * prop.reveal)
+                top = 0 if prop.from_top else g.height() - shown
+                p.drawPixmap(g.x(), g.y() + top, prop.image, 0, top, g.width(), shown)
         p.save()
         p.translate(int(self.pet.x), int(self.pet.y))
         p.setClipRect(self.pet.rect())                   # his window's edges, as on screen
@@ -457,13 +458,15 @@ def with_windows(name, action, caption, windows, at, on=None, pin=None, seed=1, 
 
 
 with_windows("perch", "perch_window", "Hop up onto a window", [LOW], 1060)
-with_windows("climb_window", "climb_window", "Climb a window's side", [TALL], 1060)
+with_windows("climb_window", "walk_up_window", "Walk straight up a window's side", [TALL], 1060)
+with_windows("climb_rope", "rope_up_window", "Or throw up a rope and climb it", [TALL], 1060)
 with_windows("window_jump", "window_jump", "Jump from window to window", [LEFT, RIGHT], 680, on=LEFT, keep=False)
 with_windows("umbrella", "hop_down", "Float down off a window under an umbrella", [HIGH], 820, on=HIGH, pin=0.9,
              keep=False)
 with_windows("parachute", "hop_down", "From high up: skydive, then the parachute", [HIGH], 820, on=HIGH, pin=0.3,
              keep=False)
-with_windows("climb_down", "climb_down", "Climb down a window's side", [TALL], 820, on=TALL)
+with_windows("climb_down", "walk_down_window", "Walk down a window's side, head first", [TALL], 820, on=TALL)
+with_windows("rappel", "rappel_down_window", "Or rappel down it", [TALL], 820, on=TALL)
 with_windows("ladder_window", "perch_window", "A ladder up to a window out of reach", [TOWER], 1060)
 
 
