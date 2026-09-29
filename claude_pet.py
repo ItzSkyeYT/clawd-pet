@@ -5625,7 +5625,7 @@ class SettingsDialog(QDialog):
         lay.addLayout(row)
         root.addWidget(box)
 
-        box = QGroupBox("Reminders (click him when you've seen one)")
+        box = QGroupBox("Reminders (each stays up until you press its Done button)")
         grid = QGridLayout(box)
         self._reminder(grid, 0, "breaks", "break_every", "Take a break every", "minutes at the computer")
         self._reminder(grid, 1, "water", "water_every", "Drink some water every", "minutes")

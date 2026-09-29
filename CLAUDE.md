@@ -153,6 +153,8 @@ to what Claude Code is doing.
 - `tools/fetch_official.py`: downloads the official Clawd GIFs from claude.ai into `assets/official/`
 - `tools/trace_official.py`: turns them into `sprites/clawd.json` and reports fidelity
 - `tests/test_pet.py`: `python -m unittest discover -s tests -v` (offscreen, no window appears)
+- `tools/make_media.py`: draws the README's GIFs (`docs/media/`) and settings screenshot,
+  offscreen on a mock desktop, each scene with a fixed seed. `--list` for the scenes
 - `assets/`: reference media, git-ignored (Anthropic's art and personal screen recordings)
 
 ## Sprites
