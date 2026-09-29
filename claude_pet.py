@@ -10,13 +10,15 @@ Claude Code: typing while it works, calling you over when it needs a
 permission, celebrating when it's done.
 
 Left-click: open Claude Code (the Code tab of the Claude app)
-Right-click: menu    Drag: pick him up and throw him    Stroke him: he likes it
+Right-click: menu    Drag: pick him up and throw him    Pet him: he likes it
 """
 
 import ast
 import calendar
 import collections
 import contextlib
+import ctypes
+import ctypes.util
 import datetime
 import json
 import math
@@ -27,6 +29,7 @@ import shlex
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -132,7 +135,7 @@ PREF_DEFAULTS = {
     "quiet": False,           # stays put and keeps to himself; Claude Code still shows
     "claude": True,           # follows Claude Code through its hooks
     "pointer": True,          # watches the pointer
-    "petting": True,          # stroke him for hearts
+    "petting": True,          # pet him for hearts
     "grab": True,             # jumps up and hangs off a pointer that hangs around above him
     "duck": True,             # drops out of sight for fullscreen windows
     "day_cycle": True,        # yawns and naps at night, coffee in the morning
@@ -984,13 +987,24 @@ def load_sprites(path=SPRITES):
 # ── Launching things ────────────────────────────────────────────────
 
 TERMINALS = [          # executable, arguments that go before the command
+    ("xdg-terminal-exec", []),          # your default terminal, where that's set up
     ("konsole", ["-e"]),
     ("gnome-terminal", ["--"]),
+    ("ptyxis", ["--"]),                 # GNOME's newer terminal (Fedora, Ubuntu)
+    ("kgx", ["--"]),                    # GNOME Console
+    ("x-terminal-emulator", ["-e"]),    # Debian's and Ubuntu's choice
     ("kitty", []),
     ("alacritty", ["-e"]),
     ("wezterm", ["start", "--"]),
+    ("ghostty", ["-e"]),
     ("foot", []),
     ("xfce4-terminal", ["-x"]),
+    ("mate-terminal", ["-x"]),
+    ("tilix", ["-e"]),
+    ("terminator", ["-x"]),
+    ("lxterminal", ["-e"]),
+    ("qterminal", ["-e"]),
+    ("cosmic-term", ["-e"]),
     ("xterm", ["-e"]),
 ]
 
@@ -1096,6 +1110,27 @@ def env_for_restart(env=None):
     return env
 
 
+def show_running(path=None):
+    """Bring the Clawd that's already running into view (on a desktop without
+    a tray, starting him again is how you get him back). False if none is."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1)
+        s.connect(path or socket_path())
+        s.sendall(b'{"cmd": "show"}\n')
+        s.close()
+        return True
+    except (OSError, AttributeError):
+        return False
+
+
+def xwayland_missing(env=None, forced=None):
+    """On Wayland he runs through XWayland: is there no X display to use?"""
+    env = os.environ if env is None else env
+    forced = _FORCED_XCB if forced is None else forced
+    return bool(forced and env.get("WAYLAND_DISPLAY") and not env.get("DISPLAY"))
+
+
 def already_running(path=None):
     """Is another Clawd listening on the socket? (A stale socket file doesn't count.)"""
     try:
@@ -1170,6 +1205,22 @@ def run_hook_installer(remove=False):
         return subprocess.run(cmd, timeout=15, capture_output=True).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def install_entries(autostart=False, launcher=LAUNCHER, entry=AUTOSTART, icon_dir=DATA_DIR):
+    """For install.sh: Clawd in the app launcher, and at login if asked."""
+    icon = write_icon(icon_dir)
+    for path, auto in [(launcher, False)] + ([(entry, True)] if autostart else []):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(desktop_entry(icon, autostart=auto))
+
+
+def uninstall_entries(launcher=LAUNCHER, entry=AUTOSTART, icon_dir=DATA_DIR):
+    """For install.sh --uninstall: the launcher and login entries and the icon."""
+    for path in (launcher, entry, os.path.join(icon_dir, "clawd.png")):
+        if os.path.exists(path):
+            os.remove(path)
 
 
 def autostart_enabled(entry=AUTOSTART):
@@ -1316,12 +1367,11 @@ class DesktopFeed(QObject):
             self._on_windows(rows)
 
 
-def start_kwin_feed(on_cursor, on_windows):
-    """Start the KWin feed; returns it, or None if this isn't KDE Wayland."""
-    if not (os.environ.get("WAYLAND_DISPLAY") and "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "")):
-        return None
+def start_dbus_feed(on_cursor, on_windows):
+    """Take our name on the session bus, for whatever reports the pointer and
+    windows (the KWin script, the GNOME extension). The feed, or None."""
     try:
-        from PyQt6.QtDBus import QDBusConnection, QDBusInterface
+        from PyQt6.QtDBus import QDBusConnection
     except ImportError:
         return None
     bus = QDBusConnection.sessionBus()
@@ -1330,6 +1380,21 @@ def start_kwin_feed(on_cursor, on_windows):
     feed = DesktopFeed(on_cursor, on_windows)
     if not bus.registerObject("/Pet", feed, QDBusConnection.RegisterOption.ExportAllSlots):
         return None
+    return feed
+
+
+def start_kwin_feed(on_cursor, on_windows):
+    """Start the KWin feed; returns it, or None if this isn't KDE Wayland."""
+    if desktop_kind() != "kde":
+        return None
+    try:
+        from PyQt6.QtDBus import QDBusConnection, QDBusInterface
+    except ImportError:
+        return None
+    feed = start_dbus_feed(on_cursor, on_windows)
+    if feed is None:
+        return None
+    bus = QDBusConnection.sessionBus()
     path = os.path.join(runtime_dir(), "clawd-pet-desktop.js")
     with open(path, "w") as f:
         f.write(kwin_desktop_script())
@@ -1352,6 +1417,349 @@ def stop_kwin_feed():
     bus = QDBusConnection.sessionBus()
     QDBusInterface("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", bus).call(
         "unloadScript", KWIN_SCRIPT)
+
+
+# ── Other desktops ──────────────────────────────────────────────────
+# Where the pointer and the windows are. On KDE a KWin script reports them
+# (above); on GNOME our extension does, over the same D-Bus interface
+# (gnome/); Hyprland and Sway answer over their IPC sockets; on any X11
+# desktop the window manager keeps the list in EWMH properties, and Qt sees
+# the pointer. Every row: [x, y, w, h, stacking, fullscreen, active, screen
+# name ("" if unknown), id], as the KWin script sends them.
+
+def desktop_kind(env=None):
+    """"kde", "gnome", "hyprland", "sway", "wayland" (another compositor) or "x11"."""
+    env = os.environ if env is None else env
+    if not env.get("WAYLAND_DISPLAY"):
+        return "x11"
+    current = env.get("XDG_CURRENT_DESKTOP", "").upper()
+    if "KDE" in current:
+        return "kde"
+    if env.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return "hyprland"
+    if env.get("SWAYSOCK"):
+        return "sway"
+    if "GNOME" in current:
+        return "gnome"
+    return "wayland"
+
+
+def ewmh_row(win, stack, geometry, frame, gtk, normal, hidden, fullscreen, desktop, current, active,
+             pid, own_pid):
+    """One X11 window as a row, from its EWMH properties; None if he can't
+    stand on it (minimised, on another desktop, a dock or menu, his own)."""
+    if geometry is None or not normal or hidden or (pid is not None and pid == own_pid):
+        return None
+    if desktop is not None and current is not None and desktop not in (current, 0xFFFFFFFF):
+        return None
+    x, y, w, h = geometry
+    if frame:                                   # the window manager's title bar and borders
+        left, right, top, bottom = frame
+        x, y, w, h = x - left, y - top, w + left + right, h + top + bottom
+    elif gtk:                                   # a client-side decorated window's invisible shadow
+        left, right, top, bottom = gtk
+        x, y, w, h = x + left, y + top, w - left - right, h - top - bottom
+    return [x, y, w, h, stack, 1 if fullscreen else 0, 1 if win == active else 0, "", str(win)]
+
+
+class X11:
+    """Just enough of libX11, through ctypes, to read the window manager's
+    EWMH properties. Its own connection, not Qt's; an X error (a window gone
+    between two calls) is ignored instead of ending the process."""
+
+    ANY, NORMAL = 0, {"_NET_WM_WINDOW_TYPE_NORMAL", "_NET_WM_WINDOW_TYPE_DIALOG"}
+
+    def __init__(self):
+        path = ctypes.util.find_library("X11")
+        if not path:
+            raise OSError("no libX11")
+        x = self.x = ctypes.CDLL(path)
+        vp, ul, i, ui = ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_uint
+        P = ctypes.POINTER
+        x.XOpenDisplay.restype, x.XOpenDisplay.argtypes = vp, [ctypes.c_char_p]
+        x.XDefaultRootWindow.restype, x.XDefaultRootWindow.argtypes = ul, [vp]
+        x.XInternAtom.restype, x.XInternAtom.argtypes = ul, [vp, ctypes.c_char_p, i]
+        x.XGetAtomName.restype, x.XGetAtomName.argtypes = vp, [vp, ul]
+        x.XGetWindowProperty.restype = i
+        x.XGetWindowProperty.argtypes = [vp, ul, ul, ctypes.c_long, ctypes.c_long, i, ul, P(ul), P(i), P(ul),
+                                         P(ul), P(P(ctypes.c_ubyte))]
+        x.XFree.argtypes = [vp]
+        x.XGetGeometry.restype = i
+        x.XGetGeometry.argtypes = [vp, ul, P(ul), P(i), P(i), P(ui), P(ui), P(ui), P(ui)]
+        x.XTranslateCoordinates.restype = i
+        x.XTranslateCoordinates.argtypes = [vp, ul, ul, i, i, P(i), P(i), P(ul)]
+        handler = ctypes.CFUNCTYPE(i, vp, vp)
+        self._ignore = handler(lambda _d, _e: 0)            # kept, or ctypes would free it
+        x.XSetErrorHandler.restype, x.XSetErrorHandler.argtypes = vp, [handler]
+        x.XSetErrorHandler(self._ignore)
+        self.dpy = x.XOpenDisplay(None)
+        if not self.dpy:
+            raise OSError("no X display")
+        self.root = x.XDefaultRootWindow(self.dpy)
+        self._atoms, self._names = {}, {}
+
+    def atom(self, name):
+        if name not in self._atoms:
+            self._atoms[name] = self.x.XInternAtom(self.dpy, name.encode(), False)
+        return self._atoms[name]
+
+    def atom_name(self, atom):
+        if atom not in self._names:
+            p = self.x.XGetAtomName(self.dpy, atom)
+            self._names[atom] = ctypes.cast(p, ctypes.c_char_p).value.decode() if p else ""
+            if p:
+                self.x.XFree(p)
+        return self._names[atom]
+
+    def prop(self, win, name):
+        """A 32-bit property's values, or [] when it isn't set."""
+        kind, fmt, n, after = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_ulong(), ctypes.c_ulong()
+        data = ctypes.POINTER(ctypes.c_ubyte)()
+        if self.x.XGetWindowProperty(self.dpy, win, self.atom(name), 0, 4096, False, self.ANY,
+                                     ctypes.byref(kind), ctypes.byref(fmt), ctypes.byref(n),
+                                     ctypes.byref(after), ctypes.byref(data)) != 0 or not data:
+            return []
+        try:
+            if fmt.value != 32:
+                return []
+            values = ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))   # 32-bit items come as C longs
+            return [values[k] & 0xFFFFFFFF for k in range(n.value)]
+        finally:
+            self.x.XFree(data)
+
+    def geometry(self, win):
+        """(x, y, width, height) of a window on the screen, or None if it's gone."""
+        root, x, y = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_int()
+        w, h, border, depth = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint()
+        if not self.x.XGetGeometry(self.dpy, win, ctypes.byref(root), ctypes.byref(x), ctypes.byref(y),
+                                   ctypes.byref(w), ctypes.byref(h), ctypes.byref(border), ctypes.byref(depth)):
+            return None
+        rx, ry, child = ctypes.c_int(), ctypes.c_int(), ctypes.c_ulong()
+        if not self.x.XTranslateCoordinates(self.dpy, win, self.root, 0, 0, ctypes.byref(rx),
+                                            ctypes.byref(ry), ctypes.byref(child)):
+            return None
+        return rx.value, ry.value, w.value, h.value
+
+    def work_area(self):
+        area = self.prop(self.root, "_NET_WORKAREA")
+        return QRect(*area[:4]) if len(area) >= 4 else None
+
+    def windows(self):
+        """The window manager's windows, bottom to top, as rows."""
+        ids = self.prop(self.root, "_NET_CLIENT_LIST_STACKING") or self.prop(self.root, "_NET_CLIENT_LIST")
+        active = (self.prop(self.root, "_NET_ACTIVE_WINDOW") or [0])[0]
+        current = (self.prop(self.root, "_NET_CURRENT_DESKTOP") or [None])[0]
+        rows = []
+        for stack, win in enumerate(ids):
+            types = {self.atom_name(a) for a in self.prop(win, "_NET_WM_WINDOW_TYPE")}
+            states = {self.atom_name(a) for a in self.prop(win, "_NET_WM_STATE")}
+            row = ewmh_row(win, stack, self.geometry(win), self.prop(win, "_NET_FRAME_EXTENTS")[:4] or None,
+                           self.prop(win, "_GTK_FRAME_EXTENTS")[:4] or None,
+                           not types or bool(types & self.NORMAL), "_NET_WM_STATE_HIDDEN" in states,
+                           "_NET_WM_STATE_FULLSCREEN" in states,
+                           (self.prop(win, "_NET_WM_DESKTOP") or [None])[0], current, active,
+                           (self.prop(win, "_NET_WM_PID") or [None])[0], os.getpid())
+            if row is not None:
+                rows.append(row)
+        return rows
+
+
+def hypr_socket(env=None):
+    """Hyprland's IPC socket, or None."""
+    env = os.environ if env is None else env
+    sig = env.get("HYPRLAND_INSTANCE_SIGNATURE")
+    if not sig:
+        return None
+    for base in (os.path.join(env.get("XDG_RUNTIME_DIR", ""), "hypr"), "/tmp/hypr"):
+        path = os.path.join(base, sig, ".socket.sock")
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def hypr_request(path, command, timeout=0.5):
+    """Ask Hyprland something ("j/clients", "j/cursorpos"...); its JSON answer."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        s.connect(path)
+        s.sendall(command.encode())
+        chunks = []
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    return json.loads(b"".join(chunks))
+
+
+def hyprland_rows(clients, monitors):
+    """Hyprland's windows on the workspaces being shown, as rows. It doesn't
+    say how they're stacked: floating ones go over tiled ones, and the most
+    recently focused over the rest."""
+    shown = {m.get("activeWorkspace", {}).get("id") for m in monitors}
+    shown |= {m.get("specialWorkspace", {}).get("id") for m in monitors} - {0, None}
+    names = {m.get("id"): m.get("name", "") for m in monitors}
+    rows = []
+    order = sorted(clients, key=lambda c: (bool(c.get("floating")), -c.get("focusHistoryID", 0)))
+    for stack, c in enumerate(order):
+        if not c.get("mapped", True) or c.get("hidden") or c.get("workspace", {}).get("id") not in shown:
+            continue
+        fs = c.get("fullscreen", 0)
+        if isinstance(fs, bool):                 # older Hyprland: a flag, and a mode where 1 is maximised
+            fs = fs and c.get("fullscreenMode", 0) == 0
+        else:                                    # newer: 1 maximised, 2 fullscreen
+            fs = fs >= 2
+        (x, y), (w, h) = c.get("at", (0, 0)), c.get("size", (0, 0))
+        rows.append([x, y, w, h, stack, 1 if fs else 0, 1 if c.get("focusHistoryID") == 0 else 0,
+                     names.get(c.get("monitor"), ""), str(c.get("address", stack))])
+    return rows
+
+
+SWAY_GET_TREE = 4
+
+
+def sway_request(path, kind, payload=b"", timeout=0.5):
+    """One message over Sway's (i3's) IPC socket; its JSON answer."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        s.connect(path)
+        s.sendall(b"i3-ipc" + struct.pack("=II", len(payload), kind) + payload)
+
+        def exactly(n):
+            data = b""
+            while len(data) < n:
+                chunk = s.recv(n - len(data))
+                if not chunk:
+                    raise OSError("sway hung up")
+                data += chunk
+            return data
+        size, _ = struct.unpack("=II", exactly(14)[6:])
+        return json.loads(exactly(size))
+
+
+def sway_rows(tree):
+    """Sway's visible windows, as rows: tiled first, floating on top."""
+    rows = []
+
+    def walk(node, output):
+        if node.get("type") == "output":
+            output = node.get("name", "")
+        for child in node.get("nodes", []) + node.get("floating_nodes", []):
+            walk(child, output)
+        if node.get("type") in ("con", "floating_con") and not node.get("nodes") and \
+                (node.get("pid") or node.get("window")) and node.get("visible"):
+            r = node.get("rect", {})
+            rows.append([r.get("x", 0), r.get("y", 0), r.get("width", 0), r.get("height", 0), 0,
+                         1 if node.get("fullscreen_mode") else 0, 1 if node.get("focused") else 0,
+                         output or "", str(node.get("id"))])
+    walk(tree, "")
+    rows.sort(key=lambda r: 0 if r[4] else 0)
+    floating = {str(n.get("id")) for n in _sway_floating(tree)}
+    rows.sort(key=lambda r: r[8] in floating)
+    for stack, r in enumerate(rows):
+        r[4] = stack
+    return rows
+
+
+def _sway_floating(node):
+    for child in node.get("floating_nodes", []):
+        yield child
+        yield from _sway_floating(child)
+    for child in node.get("nodes", []):
+        yield from _sway_floating(child)
+
+
+class PolledFeed(QObject):
+    """Asks the desktop where the windows (and maybe the pointer) are, on a
+    timer: often while he stands on a window (he rides it when it moves),
+    seldom otherwise. Rows go to the pet only when they change."""
+
+    def __init__(self, pet, windows, pointer=None):
+        super().__init__()
+        self.pet, self._windows, self._pointer = pet, windows, pointer
+        self._rows, self._waited = None, 0
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.poll)
+        self.timer.start(50 if pointer else 60)
+
+    def poll(self):
+        try:
+            if self._pointer is not None:
+                p = self._pointer()
+                if p is not None:
+                    self.pet.pointer_reported(*p)
+            self._waited += self.timer.interval()
+            if self._waited < (60 if self.pet.standing_on else 400):
+                return
+            self._waited = 0
+            rows = self._windows()
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+        if rows != self._rows:
+            self._rows = rows
+            self.pet.windows_changed(rows)
+
+
+def start_polled_feed(pet, kind=None):
+    """Hyprland, Sway or X11: a feed that asks. None elsewhere, or if it can't."""
+    kind = kind or desktop_kind()
+    if kind == "hyprland" and hypr_socket():
+        path = hypr_socket()
+
+        def pointer():
+            p = hypr_request(path, "j/cursorpos")
+            return int(p["x"]), int(p["y"])
+        return PolledFeed(pet, lambda: hyprland_rows(hypr_request(path, "j/clients"),
+                                                      hypr_request(path, "j/monitors")), pointer)
+    if kind == "sway" and os.environ.get("SWAYSOCK"):
+        path = os.environ["SWAYSOCK"]
+        return PolledFeed(pet, lambda: sway_rows(sway_request(path, SWAY_GET_TREE)))
+    if kind == "x11" and x11() is not None:
+        return PolledFeed(pet, lambda: x11().windows())
+    return None
+
+
+_x11 = {"conn": None, "tried": False}
+
+
+def x11():
+    """Our libX11 connection, or None (not on X11, or no libX11)."""
+    if not _x11["tried"]:
+        _x11["tried"] = True
+        if QGuiApplication.platformName() == "xcb":
+            try:
+                _x11["conn"] = X11()
+            except OSError:
+                _x11["conn"] = None
+    return _x11["conn"]
+
+
+def wallpaper_line_changed(line):
+    """Does a line from `gsettings monitor` or `xfconf-query -m` mean the
+    wallpaper changed?"""
+    key = line.split(":", 1)[0].strip()
+    if key in ("picture-uri", "picture-uri-dark", "picture-filename"):
+        return True
+    line = line.strip()
+    return line.startswith("set: /backdrop/") and line.endswith(("last-image", "image-path"))
+
+
+def wallpaper_monitor_command(env=None, which=shutil.which):
+    """A command that prints a line when the wallpaper changes, on GNOME,
+    Cinnamon, MATE, Budgie or XFCE (KDE has its own watch). Or None."""
+    env = os.environ if env is None else env
+    current = env.get("XDG_CURRENT_DESKTOP", "").upper()
+    if "XFCE" in current:
+        return ["xfconf-query", "-c", "xfce4-desktop", "-m"] if which("xfconf-query") else None
+    if not which("gsettings"):
+        return None
+    if "CINNAMON" in current:
+        return ["gsettings", "monitor", "org.cinnamon.desktop.background"]
+    if "MATE" in current:
+        return ["gsettings", "monitor", "org.mate.background"]
+    if any(d in current for d in ("GNOME", "BUDGIE", "UNITY", "PANTHEON")):
+        return ["gsettings", "monitor", "org.gnome.desktop.background"]
+    return None
 
 
 # ── Screens ─────────────────────────────────────────────────────────
@@ -1387,11 +1795,16 @@ def x11_work_area():
     """
     if "xprop" not in _work_area:
         _work_area["xprop"] = shutil.which("xprop")
-    if QApplication.platformName() != "xcb" or not _work_area["xprop"]:
+    if QApplication.platformName() != "xcb":
         return None
     now = time.monotonic()
     if now - _work_area["checked"] > 10:
         _work_area["checked"] = now
+        if x11() is not None:
+            _work_area["rect"] = x11().work_area()
+            return _work_area["rect"]
+        if not _work_area["xprop"]:
+            return None
         try:
             out = subprocess.run(["xprop", "-root", "_NET_WORKAREA"], capture_output=True,
                                  text=True, timeout=2).stdout
@@ -1724,6 +2137,8 @@ class ClawdPet(QWidget):
         self._glance_dir = "look_l"
         self._last_activity = 0.0      # last time you or Claude Code did anything
         self._poll_cursor = False
+        self._reported_at = -1e9                # when the desktop last told us where the pointer is
+                                                # (once it has, Qt isn't asked: it can't see over Wayland apps)
         self._polled = 0.0
         self._tracking = False
         self._pet_dir = 0
@@ -1876,6 +2291,9 @@ class ClawdPet(QWidget):
         for r in rows:
             try:
                 x, y, w, h, stack, fs, active, output, wid = r[:9]
+                if not output:                   # not reported (GNOME, X11): the screen it's mostly on
+                    screen = QApplication.screenAt(QPoint(int(x) + int(w) // 2, int(y) + int(h) // 2))
+                    output = screen.name() if screen is not None else ""
                 new.append({"x": int(x), "y": int(y), "w": int(w), "h": int(h), "stack": int(stack),
                             "fs": bool(fs), "active": bool(active), "output": str(output), "id": str(wid)})
             except (ValueError, TypeError):
@@ -2193,7 +2611,7 @@ class ClawdPet(QWidget):
                 self.wait += next(self.script)
             except StopIteration:
                 self._next()
-        if self._poll_cursor and self.now - self._polled > 100:
+        if self._poll_cursor and self.now - self._polled > 100 and self._reported_at < 0:
             self._polled = self.now
             p = QCursor.pos()
             if self.cursor is None or (p.x(), p.y()) != self.cursor[:2]:
@@ -2356,6 +2774,10 @@ class ClawdPet(QWidget):
                 self.set_pref(msg["pref"], msg["value"])
             elif msg.get("cmd") == "restart":
                 self.restart()
+            elif msg.get("cmd") == "show":
+                self.show_again()
+            elif msg.get("cmd") == "quit":
+                QApplication.quit()
             elif msg.get("cmd") == "icons":
                 icons = [[n, r.x(), r.y(), r.width(), r.height(), d] for n, r, d in self.icon_source()]
                 conn.write((json.dumps(icons) + "\n").encode())
@@ -2365,6 +2787,13 @@ class ClawdPet(QWidget):
                 conn.flush()
             elif "event" in msg:
                 self.claude_event(msg)
+
+    def show_again(self):
+        """Back into view (hidden from the tray, or started a second time)."""
+        self.show()
+        self.raise_()
+        if getattr(self, "on_shown", None):
+            self.on_shown()
 
     def status(self):
         left, _ = self.box_span()
@@ -2465,6 +2894,12 @@ class ClawdPet(QWidget):
 
     # ── The pointer ───────────────────────────────────────────────
 
+    def pointer_reported(self, x, y):
+        """The pointer, from the desktop itself (KWin, the GNOME extension,
+        Hyprland): trusted over polling Qt, which can't see it over Wayland apps."""
+        self._reported_at = self.now
+        self.cursor_moved(x, y)
+
     def cursor_moved(self, x, y):
         prev = self.cursor
         self.cursor = (x, y, self.now)
@@ -2487,7 +2922,7 @@ class ClawdPet(QWidget):
                 self._pet_flips.append(self.now)
             self._pet_dir = d
         self._pet_flips = [t for t in self._pet_flips if self.now - t < 1500]
-        if over and len(self._pet_flips) >= 3 and self.prefs["petting"]:   # stroked back and forth
+        if over and len(self._pet_flips) >= 3 and self.prefs["petting"]:   # petted back and forth
             self._petting_until = self.now + 500
         if self._engaged():
             self._last_activity = self.now
@@ -3585,6 +4020,25 @@ class ClawdPet(QWidget):
         self.layers = {}
 
     # ── The wallpaper ─────────────────────────────────────────────
+
+    def watch_wallpaper_command(self, cmd):
+        """Off KDE: a command (`gsettings monitor`, `xfconf-query -m`) that
+        prints a line whenever the desktop's settings change."""
+        from PyQt6.QtCore import QProcess
+        proc = self._wall_proc = QProcess(self)
+        proc.readyReadStandardOutput.connect(self._wallpaper_lines)
+        proc.start(cmd[0], cmd[1:])
+
+    def _wallpaper_lines(self):
+        text = bytes(self._wall_proc.readAllStandardOutput()).decode(errors="replace")
+        if any(wallpaper_line_changed(line) for line in text.splitlines()):
+            self.wallpaper_changed()
+
+    def stop_watching_wallpaper(self):
+        proc = getattr(self, "_wall_proc", None)
+        if proc is not None:
+            proc.kill()
+            proc.waitForFinished(500)
 
     def watch_wallpaper(self, path=PLASMA_DESKTOP_RC):
         """Be ready for the wallpaper changing: slideshows on the clock, and
@@ -5302,7 +5756,7 @@ class ClawdPet(QWidget):
     def mouseMoveEvent(self, e):
         pos = e.globalPosition().toPoint()
         if self._press is None:
-            self.cursor_moved(pos.x(), pos.y())  # just hovering: maybe a stroke
+            self.cursor_moved(pos.x(), pos.y())  # just hovering: maybe petting him
             return
         if not self.dragging and (pos - self._press).manhattanLength() > 6:
             self.dragging = True
@@ -5355,6 +5809,7 @@ class ClawdPet(QWidget):
         if self.settings is not None:
             self.settings.sync()
         stop_kwin_feed()
+        self.stop_watching_wallpaper()
         cmd = restart_command()
         os.execve(cmd[0], cmd, env_for_restart())
 
@@ -5381,21 +5836,33 @@ class ClawdPet(QWidget):
         e.ignore()
         return False
 
+    @staticmethod
+    def _carries_links(mime):
+        """Does a drag carry file links? Only its formats are looked at: from a
+        Wayland app (through XWayland) the links themselves come with the drop."""
+        return mime is not None and mime.hasUrls()
+
     def dragEnterEvent(self, e):
-        if self._dropped_folder(e.mimeData()) is None or not self._take(e):
+        if not self._carries_links(e.mimeData()) or not self._take(e):
             e.ignore()
             return
+        self._hovered()
+
+    def dragMoveEvent(self, e):
+        # checked on every move, not just the enter: KWin may only offer the
+        # copy once the drag's source has said what it allows
+        if self._carries_links(e.mimeData()) and self._take(e):
+            self._hovered()
+        else:
+            e.ignore()
+
+    def _hovered(self):
+        """Something he can take is hovering over him: arms up, "for me?"."""
         self._drag_seen = self.now
         if not self._drag_over:
             self._drag_over = True
             self._before_drag = self.frame
             self._emit("excl", 11, -8, vy=-2, life=1000)
-
-    def dragMoveEvent(self, e):
-        if self._drag_over and self._take(e):
-            self._drag_seen = self.now
-        else:
-            e.ignore()
 
     def dragLeaveEvent(self, _e):
         if self._drag_over and self._before_drag is not None:
@@ -5580,7 +6047,7 @@ class SettingsDialog(QDialog):
         box = QGroupBox("Reactions")
         lay = QVBoxLayout(box)
         lay.addWidget(self._check("pointer", "Watch the pointer"))
-        lay.addWidget(self._check("petting", "Enjoy being petted (stroke him back and forth)"))
+        lay.addWidget(self._check("petting", "Enjoy being petted (move the pointer back and forth over him)"))
         lay.addWidget(self._check("grab", "Grab onto the pointer when it hangs around above him "
                                           "(shake it to get him off)"))
         lay.addWidget(self._check("duck", "Duck out of sight while something is fullscreen"))
@@ -5712,8 +6179,22 @@ def tray_icon(sprites):
 
 
 def main():
-    if already_running():
-        print("Clawd is already running.")
+    args = sys.argv[1:]
+    if "--install" in args or "--uninstall" in args:     # install.sh's helpers: no window
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        app = QGuiApplication(sys.argv[:1])
+        if "--uninstall" in args:
+            uninstall_entries()
+        else:
+            install_entries(autostart="--autostart" in args)
+        return
+    if xwayland_missing():
+        print("Clawd runs through XWayland on Wayland (a pet has to place his own window), and there's no "
+              "X display. Install XWayland (xorg-xwayland on Arch, xwayland on Debian, Ubuntu and Fedora) "
+              "and log in again.", file=sys.stderr)
+        sys.exit(1)
+    if show_running():
+        print("Clawd is already running: he's back in view.")
         return
     app = QApplication(sys.argv)
     app.setApplicationName("clawd-pet")
@@ -5723,15 +6204,24 @@ def main():
     pet = ClawdPet(sprites, settings)
     pet.show()
     pet.listen()
-    feed = start_kwin_feed(pet.cursor_moved, pet.windows_changed)
-    pet._poll_cursor = feed is None
+    # where the pointer and the windows are: see "Other desktops"
+    kind = desktop_kind()
+    feed = start_kwin_feed(pet.pointer_reported, pet.windows_changed)
     if feed is not None:
         app.aboutToQuit.connect(stop_kwin_feed)
         catcher = DropCatcher(pet)               # KWin won't hand drags to him directly
         if catcher.typed:
             pet.catcher = catcher
-    if os.path.exists(PLASMA_DESKTOP_RC):
-        pet.watch_wallpaper()
+    elif kind == "gnome":
+        feed = start_dbus_feed(pet.pointer_reported, pet.windows_changed)   # our extension reports there
+    else:
+        pet.polled_feed = start_polled_feed(pet, kind)
+    pet._poll_cursor = not (kind == "kde" and feed is not None)   # a reported pointer beats it anyway
+    if "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper() and os.path.exists(PLASMA_DESKTOP_RC):
+        pet.watch_wallpaper()                    # Plasma, Wayland or X11
+    elif wallpaper_monitor_command() is not None:
+        pet.watch_wallpaper_command(wallpaper_monitor_command())
+        app.aboutToQuit.connect(pet.stop_watching_wallpaper)
 
     if QSystemTrayIcon.isSystemTrayAvailable():
         tray = QSystemTrayIcon(tray_icon(sprites), app)
@@ -5746,6 +6236,7 @@ def main():
             show_hide.setText("Hide Clawd" if pet.isVisible() else "Show Clawd")
 
         show_hide.triggered.connect(lambda _=False: flip())
+        pet.on_shown = lambda: show_hide.setText("Hide Clawd")
         tray.activated.connect(
             lambda reason: flip() if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
         tray.setContextMenu(menu)

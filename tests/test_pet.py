@@ -1086,6 +1086,205 @@ class PlayWithAGoal(unittest.TestCase):
         self.assertNotEqual(self.pet.action, "hop_down")
 
 
+class InstallEntries(unittest.TestCase):
+    """What install.sh has the app write: a launcher entry, start at login, an icon."""
+
+    def test_install_and_uninstall(self):
+        d = tempfile.mkdtemp()
+        paths = dict(launcher=os.path.join(d, "apps", "clawd-pet.desktop"),
+                     entry=os.path.join(d, "autostart", "clawd-pet.desktop"), icon_dir=os.path.join(d, "data"))
+        cp.install_entries(autostart=False, **paths)
+        self.assertTrue(os.path.exists(paths["launcher"]))
+        self.assertFalse(os.path.exists(paths["entry"]))
+        cp.install_entries(autostart=True, **paths)
+        with open(paths["entry"]) as f:
+            text = f.read()
+        self.assertIn("Exec=", text)
+        self.assertIn("claude_pet.py", text)
+        self.assertTrue(os.path.exists(os.path.join(paths["icon_dir"], "clawd.png")))
+        cp.uninstall_entries(**paths)
+        self.assertFalse(any(os.path.exists(p) for p in (paths["launcher"], paths["entry"],
+                                                         os.path.join(paths["icon_dir"], "clawd.png"))))
+
+
+class Desktops(unittest.TestCase):
+    """Beyond KDE: which desktop he's on, and where the windows and pointer
+    are on GNOME (an extension), Hyprland and Sway (their IPC) and X11 (EWMH)."""
+
+    def test_which_desktop(self):
+        k = cp.desktop_kind
+        self.assertEqual(k({"WAYLAND_DISPLAY": "w", "XDG_CURRENT_DESKTOP": "KDE"}), "kde")
+        self.assertEqual(k({"WAYLAND_DISPLAY": "w", "XDG_CURRENT_DESKTOP": "ubuntu:GNOME"}), "gnome")
+        self.assertEqual(k({"WAYLAND_DISPLAY": "w", "HYPRLAND_INSTANCE_SIGNATURE": "abc"}), "hyprland")
+        self.assertEqual(k({"WAYLAND_DISPLAY": "w", "SWAYSOCK": "/run/sway.sock"}), "sway")
+        self.assertEqual(k({"WAYLAND_DISPLAY": "w", "XDG_CURRENT_DESKTOP": "COSMIC"}), "wayland")
+        self.assertEqual(k({"DISPLAY": ":0", "XDG_CURRENT_DESKTOP": "XFCE"}), "x11")
+        self.assertEqual(k({"DISPLAY": ":0", "XDG_CURRENT_DESKTOP": "KDE"}), "x11")
+
+    def test_no_xwayland(self):
+        self.assertTrue(cp.xwayland_missing({"WAYLAND_DISPLAY": "w"}, forced=True))
+        self.assertFalse(cp.xwayland_missing({"WAYLAND_DISPLAY": "w", "DISPLAY": ":0"}, forced=True))
+        self.assertFalse(cp.xwayland_missing({"WAYLAND_DISPLAY": "w"}, forced=False))
+
+    def test_x11_windows(self):
+        row = cp.ewmh_row
+        base = dict(win=0x1400003, stack=2, geometry=(100, 130, 600, 400), frame=None, gtk=None,
+                    normal=True, hidden=False, fullscreen=False, desktop=0, current=0, active=0, pid=1, own_pid=9)
+        self.assertEqual(row(**base), [100, 130, 600, 400, 2, 0, 0, "", str(0x1400003)])
+        # a title bar and borders drawn by the window manager count as the window
+        self.assertEqual(row(**dict(base, frame=(2, 2, 30, 2)))[:4], [98, 100, 604, 432])
+        # a client-side decorated window's invisible shadow doesn't
+        self.assertEqual(row(**dict(base, gtk=(20, 20, 16, 24)))[:4], [120, 146, 560, 360])
+        self.assertEqual(row(**dict(base, fullscreen=True, active=0x1400003))[5:7], [1, 1])
+        self.assertIsNone(row(**dict(base, hidden=True)))                  # minimised
+        self.assertIsNone(row(**dict(base, desktop=1)))                   # on another desktop
+        self.assertIsNotNone(row(**dict(base, desktop=0xFFFFFFFF)))       # on all of them
+        self.assertIsNone(row(**dict(base, normal=False)))                # a dock, a menu...
+        self.assertIsNone(row(**dict(base, pid=9)))                       # himself
+        self.assertIsNone(row(**dict(base, geometry=None)))               # gone meanwhile
+
+    HYPR_MONITORS = [{"id": 0, "name": "eDP-1", "activeWorkspace": {"id": 1}, "specialWorkspace": {"id": 0}},
+                     {"id": 1, "name": "HDMI-A-1", "activeWorkspace": {"id": 4}, "specialWorkspace": {"id": 0}}]
+
+    def hypr_client(self, addr, ws, at, size, floating=False, focus=3, fullscreen=0, mapped=True):
+        return {"address": addr, "mapped": mapped, "hidden": False, "at": at, "size": size,
+                "workspace": {"id": ws, "name": str(ws)}, "floating": floating, "monitor": 0 if ws == 1 else 1,
+                "class": "firefox", "focusHistoryID": focus, "fullscreen": fullscreen}
+
+    def test_hyprland_windows(self):
+        clients = [self.hypr_client("0xa", 1, [10, 40], [900, 700], focus=1),
+                   self.hypr_client("0xb", 1, [300, 200], [500, 400], floating=True, focus=0),
+                   self.hypr_client("0xc", 2, [0, 0], [100, 100]),               # workspace not shown
+                   self.hypr_client("0xd", 4, [1930, 10], [800, 600], focus=2, fullscreen=2)]
+        rows = cp.hyprland_rows(clients, self.HYPR_MONITORS)
+        by = {r[8]: r for r in rows}
+        self.assertEqual(set(by), {"0xa", "0xb", "0xd"})
+        self.assertEqual(by["0xa"][:4], [10, 40, 900, 700])
+        self.assertGreater(by["0xb"][4], by["0xa"][4])                          # floating on top
+        self.assertEqual(by["0xb"][6], 1)                                        # focused
+        self.assertEqual((by["0xd"][5], by["0xd"][7]), (1, "HDMI-A-1"))
+        old = dict(self.hypr_client("0xe", 1, [0, 0], [10, 10]), fullscreen=True, fullscreenMode=1)
+        self.assertEqual(cp.hyprland_rows([old], self.HYPR_MONITORS)[0][5], 0)  # maximised, not fullscreen
+
+    def test_sway_windows(self):
+        leaf = lambda i, x, y, w, h, **kw: dict({"id": i, "type": "con", "pid": 100 + i, "nodes": [],
+                                                 "floating_nodes": [], "visible": True, "focused": False,
+                                                 "fullscreen_mode": 0,
+                                                 "rect": {"x": x, "y": y, "width": w, "height": h}}, **kw)
+        tree = {"type": "root", "nodes": [
+            {"type": "output", "name": "__i3", "nodes": [], "floating_nodes": []},
+            {"type": "output", "name": "eDP-1", "nodes": [
+                {"type": "workspace", "nodes": [leaf(5, 0, 30, 960, 1170), leaf(6, 960, 30, 960, 1170,
+                                                                               focused=True)],
+                 "floating_nodes": [leaf(7, 400, 300, 600, 400, type="floating_con")]},
+                {"type": "workspace", "nodes": [leaf(8, 0, 30, 1920, 1170, visible=False)],
+                 "floating_nodes": []}], "floating_nodes": []}]}
+        rows = cp.sway_rows(tree)
+        by = {r[8]: r for r in rows}
+        self.assertEqual(set(by), {"5", "6", "7"})
+        self.assertEqual(by["6"][6], 1)
+        self.assertEqual(by["5"][7], "eDP-1")
+        self.assertGreater(by["7"][4], by["6"][4])                              # floating on top
+
+    def serve(self, reply):
+        """A one-shot Unix socket server; returns its path and what it was sent."""
+        import threading
+        path = os.path.join(tempfile.mkdtemp(), "ipc.sock")
+        srv = socket.socket(socket.AF_UNIX)
+        srv.bind(path)
+        srv.listen(1)
+        got = []
+
+        def run():
+            c, _ = srv.accept()
+            got.append(c.recv(65536))
+            c.sendall(reply(got[0]))
+            c.close()
+            srv.close()
+        threading.Thread(target=run, daemon=True).start()
+        return path, got
+
+    def test_hyprland_ipc(self):
+        path, got = self.serve(lambda req: json.dumps({"x": 812, "y": 407}).encode())
+        self.assertEqual(cp.hypr_request(path, "j/cursorpos"), {"x": 812, "y": 407})
+        self.assertEqual(got[0], b"j/cursorpos")
+
+    def test_sway_ipc(self):
+        import struct
+        body = json.dumps({"type": "root", "nodes": []}).encode()
+        path, got = self.serve(lambda req: b"i3-ipc" + struct.pack("=II", len(body), 4) + body)
+        self.assertEqual(cp.sway_request(path, 4), {"type": "root", "nodes": []})
+        self.assertEqual(got[0][:6], b"i3-ipc")
+        self.assertEqual(struct.unpack("=II", got[0][6:14]), (0, 4))
+
+    def test_a_window_without_a_screen_name_gets_one(self):
+        pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        pet.windows_changed([[2400, 100, 600, 400, 1, 1, 1, "", "g1"], [200, 600, 600, 400, 2, 0, 0, "", "g2"]])
+        by = {w["id"]: w["output"] for w in pet.window_list}
+        self.assertEqual(by, {"g1": "HDMI-A-1", "g2": "eDP-1"})
+        pet.timer.stop()
+        pet.deleteLater()
+
+    def test_a_reported_pointer_beats_polling(self):
+        pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        pet._poll_cursor = True
+        pet.pointer_reported(700, 1400)                   # from the GNOME extension, say
+        for _ in range(int(5000 / 16)):                   # it only reports moves: still after that,
+            pet.advance(16)                               # and Qt (offscreen: stuck at 0,0) isn't asked
+        self.assertEqual(pet.cursor[:2], (700, 1400))
+        pet.timer.stop()
+        pet.deleteLater()
+
+    def test_terminals(self):
+        have = lambda names: (lambda n: "/usr/bin/" + n if n in names else None)
+        tc = cp.terminal_command
+        self.assertEqual(tc(["claude"], which=have({"xdg-terminal-exec", "konsole"}), env={}),
+                         ["/usr/bin/xdg-terminal-exec", "claude"])
+        self.assertEqual(tc(["claude"], which=have({"x-terminal-emulator"}), env={}),
+                         ["/usr/bin/x-terminal-emulator", "-e", "claude"])
+        self.assertEqual(tc(["claude"], which=have({"ptyxis"}), env={}), ["/usr/bin/ptyxis", "--", "claude"])
+        self.assertEqual(tc(["claude"], which=have({"kgx"}), env={}), ["/usr/bin/kgx", "--", "claude"])
+        self.assertIsNone(tc(["claude"], which=have(set()), env={}))
+
+    def test_a_new_wallpaper_elsewhere_gives_him_a_fright(self):
+        """GNOME and co: `gsettings monitor` prints a line when the picture changes."""
+        pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        pet.set_box_left(900)
+        pet.y = pet.ground_y()
+        pet.start("idle")
+        pet.watch_wallpaper_command(["sh", "-c", "sleep 0.3; echo \"picture-uri: 'file:///x.jpg'\"; sleep 5"])
+        deadline = time.time() + 5
+        while time.time() < deadline and pet.action != "startled":
+            APP.processEvents()
+            pet.advance(16)
+            time.sleep(0.01)
+        self.assertEqual(pet.action, "startled")
+        pet.stop_watching_wallpaper()
+        pet.timer.stop()
+        pet.deleteLater()
+
+    def test_which_wallpaper_watch(self):
+        have = lambda *names: (lambda n: "/usr/bin/" + n if n in names else None)
+        cmd = cp.wallpaper_monitor_command
+        self.assertEqual(cmd({"XDG_CURRENT_DESKTOP": "ubuntu:GNOME"}, which=have("gsettings")),
+                         ["gsettings", "monitor", "org.gnome.desktop.background"])
+        self.assertEqual(cmd({"XDG_CURRENT_DESKTOP": "X-Cinnamon"}, which=have("gsettings")),
+                         ["gsettings", "monitor", "org.cinnamon.desktop.background"])
+        self.assertEqual(cmd({"XDG_CURRENT_DESKTOP": "XFCE"}, which=have("xfconf-query", "gsettings"))[0],
+                         "xfconf-query")
+        self.assertIsNone(cmd({"XDG_CURRENT_DESKTOP": "KDE"}, which=have("gsettings")))   # KDE: its own watch
+        self.assertIsNone(cmd({"XDG_CURRENT_DESKTOP": "GNOME"}, which=have()))
+
+    def test_wallpaper_lines(self):
+        w = cp.wallpaper_line_changed
+        self.assertTrue(w("picture-uri: 'file:///home/me/a.jpg'"))
+        self.assertTrue(w("picture-uri-dark: 'file:///home/me/b.jpg'"))
+        self.assertTrue(w("picture-filename: '/usr/share/backgrounds/c.png'"))           # MATE
+        self.assertTrue(w("set: /backdrop/screen0/monitoreDP-1/workspace0/last-image"))  # XFCE
+        self.assertFalse(w("primary-color: '#023c88'"))
+        self.assertFalse(w("set: /desktop-icons/style"))
+
+
 class ClaudeHooks(unittest.TestCase):
     def setUp(self):
         random.seed(5)
@@ -1277,6 +1476,29 @@ class ClaudeHooks(unittest.TestCase):
         self.assertEqual(self.pet.prefs["break_every"], 60)
         self.assertIs(self.pet.status()["claude"], False)
 
+    def test_launched_again_he_comes_back_into_view(self):
+        """Hidden with no tray to bring him back (GNOME has none): starting him
+        again shows the one that's running instead of a second Clawd."""
+        self.assertTrue(self.pet.listen(self.sock))
+        self.pet.hide()
+        self.assertTrue(cp.show_running(self.sock))
+        self.assertTrue(self.pump(lambda: self.pet.isVisible()))
+        self.assertFalse(cp.show_running(self.sock + ".missing"))
+
+    def test_quit_over_the_socket(self):
+        self.assertTrue(self.pet.listen(self.sock))
+        quits = []
+        real = cp.QApplication.quit
+        cp.QApplication.quit = lambda: quits.append(1)
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(self.sock)
+            s.sendall(b'{"cmd": "quit"}\n')
+            s.close()
+            self.assertTrue(self.pump(lambda: quits))
+        finally:
+            cp.QApplication.quit = real
+
     def test_the_hook_is_silent_and_quick_without_a_pet(self):
         t = time.time()
         r = self.hook({"hook_event_name": "Stop", "session_id": "s1"}, sock=self.sock + ".missing")
@@ -1393,7 +1615,7 @@ class CursorReactions(unittest.TestCase):
         self.pet.advance(16)
         self.assertEqual(self.pet.frame, ("pose", "look_r", False))
 
-    def test_stroking_him_makes_him_happy(self):
+    def test_petting_him_makes_him_happy(self):
         left, right = self.pet.box_span()
         cx, mid = (left + right) / 2, self.pet._mid()
         hearts, happy = False, False
@@ -1757,6 +1979,44 @@ class DropAFolder(unittest.TestCase):
         run_ms(self.pet, 800)
         self.assertNotEqual(self.pet.x, x)          # and carries on walking afterwards
 
+    def late(self, kind, path, actions=Qt.DropAction.CopyAction, dropped=False):
+        """A drag as XWayland hands it over from a Wayland app: it says it has
+        file links, but the links themselves only come with the drop."""
+        from PyQt6.QtCore import QMimeData, QPoint, QPointF, QUrl
+        from PyQt6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+
+        class Late(QMimeData):
+            def formats(self):
+                return ["text/uri-list"]
+
+            def hasFormat(self, fmt):
+                return fmt == "text/uri-list"
+
+            def retrieveData(self, fmt, kind):
+                return [QUrl.fromLocalFile(path)] if dropped else None
+        mime = self.mime = Late()
+        args = (actions, mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        return {"enter": lambda: QDragEnterEvent(QPoint(10, 10), *args),
+                "move": lambda: QDragMoveEvent(QPoint(12, 10), *args),
+                "drop": lambda: QDropEvent(QPointF(10, 10), *args)}[kind]()
+
+    def test_links_that_only_come_with_the_drop(self):
+        ev = self.late("enter", self.tmp)
+        self.pet.dragEnterEvent(ev)
+        self.assertTrue(ev.isAccepted())                        # arms up already
+        self.assertTrue(self.pet._drag_over)
+        self.pet.dropEvent(self.late("drop", self.tmp, dropped=True))
+        self.assertEqual(self.opened, [self.tmp])
+
+    def test_a_move_can_take_what_the_enter_could_not(self):
+        ev = self.late("enter", self.tmp, Qt.DropAction.IgnoreAction)   # the copy isn't on offer yet
+        self.pet.dragEnterEvent(ev)
+        self.assertFalse(self.pet._drag_over)
+        ev = self.late("move", self.tmp)                        # now it is
+        self.pet.dragMoveEvent(ev)
+        self.assertTrue(ev.isAccepted())
+        self.assertTrue(self.pet._drag_over)
+
     def test_a_drag_that_vanishes_is_forgotten(self):
         self.pet.dragEnterEvent(self.event("enter", self.tmp))
         run_ms(self.pet, cp.DRAG_FORGET + 500)
@@ -1862,7 +2122,7 @@ class Settings(unittest.TestCase):
         self.assertLess(self.idle_share("lively"), 0.2)
         self.assertGreater(self.idle_share("normal"), 0.3)
 
-    def stroke(self):
+    def pet_him(self):
         left, right = self.pet.box_span()
         cx, mid = (left + right) / 2, self.pet._mid()
         hearts = False
@@ -1874,7 +2134,7 @@ class Settings(unittest.TestCase):
 
     def test_no_hearts_when_petting_is_off(self):
         self.pet.prefs["petting"] = False
-        self.assertFalse(self.stroke())
+        self.assertFalse(self.pet_him())
 
     def test_no_eyes_on_the_pointer_when_that_is_off(self):
         self.pet.prefs["pointer"] = False

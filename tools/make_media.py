@@ -531,19 +531,19 @@ def _watch():
     st.save("watch", "M")
 
 
-@scene("petting", "you", "Stroke him: hearts, then a dance")
+@scene("petting", "you", "Pet him: hearts, then a dance")
 def _petting():
     st = Stage()
     st.stand(900)
     st.show_cursor = True
     cx, y = mid(st), st.pet._mid()
 
-    def stroke(t):
+    def pet(t):
         if t < 5200:
             st.pet.cursor_moved(int(cx + 26 * math.sin(t / 95)), int(y - 6))
         else:
             st.pet.cursor_moved(int(cx + 170), int(y - 90))
-    st.run(9500, each=stroke)
+    st.run(9500, each=pet)
     st.save("petting", "M")
 
 
