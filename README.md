@@ -23,7 +23,7 @@ birthday cake) is drawn on the same pixel grid, in the same palette.
   [with Claude Code](#with-claude-code) · [around your desktop](#around-your-desktop) ·
   [with you](#with-you) · [time and seasons](#time-and-seasons) · [reminders](#reminders)
 - [Controls](#controls) · [Settings](#settings) · [Claude Code hooks](#claude-code-hooks)
-- [How it works](#how-it-works) · [Development](#development)
+- [How it works](#how-it-works) · [Development](#development) · [License](#license)
 
 ## Install
 
@@ -321,3 +321,10 @@ The tests run the real behaviours on a fake two-screen desktop. The GIFs are mad
 same way, on a mock desktop, so they only change when Clawd does.
 `tools/fetch_official.py` and `tools/trace_official.py` download the official Clawd
 GIFs and trace them into `sprites/clawd.json`.
+
+## License
+
+The code is [MIT](LICENSE): use it however you like. The artwork (the sprites, and the
+GIFs in this README) is not: it's all rights reserved, and using it anywhere but Clawd
+itself needs my permission. [LICENSE-ASSETS.md](LICENSE-ASSETS.md) has the details.
+Clawd himself belongs to Anthropic.

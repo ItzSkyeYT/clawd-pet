@@ -169,6 +169,8 @@ to what Claude Code is doing.
 - `tools/make_media.py`: draws the README's GIFs (`docs/media/`) and settings screenshot,
   offscreen on a mock desktop, each scene with a fixed seed. `--list` for the scenes
 - `assets/`: reference media, git-ignored (Anthropic's art and personal screen recordings)
+- `LICENSE`: MIT, for the code only. `LICENSE-ASSETS.md`: the artwork (`sprites/`, `docs/media/`)
+  stays all rights reserved; Clawd himself is Anthropic's
 
 ## Sprites
 - All official Clawd art sits on one grid: the idle pose is 12x8 pixels and details
