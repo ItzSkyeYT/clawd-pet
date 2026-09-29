@@ -123,6 +123,25 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
   canopy is a layer placed by `_held_at()` so the art's `anchor` cell sits in the dangle
   frame's fists. `start()` packs it away if anything interrupts
 
+## Other desktops
+- `desktop_kind()` from the environment: no `WAYLAND_DISPLAY` is X11 (whatever the desktop);
+  on Wayland, KDE, Hyprland (`HYPRLAND_INSTANCE_SIGNATURE`), Sway (`SWAYSOCK`), GNOME, or
+  another compositor (floors only, the pointer only over X11 apps)
+- Every source hands `windows_changed()` the KWin script's rows. A row without a screen name
+  gets the screen under its middle. `pointer_reported()` marks the pointer as coming from
+  the desktop; from then on Qt isn't polled (over Wayland apps it's stale)
+- KDE: the KWin script (`start_kwin_feed`). GNOME: `start_dbus_feed` takes the bus name and
+  the extension (it polls the pointer every 40 ms, the windows every 150 ms, only while our
+  name is on the bus) calls `Cursor`/`Windows`, like the KWin script
+- Hyprland: `hypr_request()` over `.socket.sock` (`j/clients`, `j/monitors`, `j/cursorpos`);
+  no stacking info, so floating over tiled, then by focus history. Sway: the i3 IPC framing
+  (`sway_request`, GET_TREE), visible leaf containers, floating on top. X11: `X11` reads
+  `_NET_CLIENT_LIST_STACKING`, frame extents (the title bar counts, a CSD shadow doesn't),
+  state, type, desktop, pid; an ignoring error handler, since windows vanish between calls.
+  `PolledFeed` asks every 400 ms, every 60 ms while he stands on a window
+- Tested on a real X server: `xvfb-run` with a fake EWMH window manager (a script that sets
+  the root properties); he finds the work area, both windows, and hops onto one
+
 ## Getting there (Play goes and does it)
 - A played scene sets up what it needs instead of giving up. `_get_down()` hops off
   window tops to a floor; `_travel_to(area)` crosses screens with the ladder

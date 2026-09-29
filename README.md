@@ -27,37 +27,56 @@ birthday cake) is drawn on the same pixel grid, in the same palette.
 
 ## Install
 
-He needs Python 3 and PyQt6.
-
-```bash
-# Arch, CachyOS, Manjaro
-sudo pacman -S python-pyqt6
-# Debian 12+, Ubuntu 22.04+
-sudo apt install python3-pyqt6
-# Fedora
-sudo dnf install python3-pyqt6
-# openSUSE
-sudo zypper install python3-PyQt6
-# anything else
-pip install --user PyQt6
-```
-
-Then:
-
 ```bash
 git clone https://github.com/ItzSkyeYT/clawd-pet
 cd clawd-pet
+./install.sh
+```
+
+The installer finds PyQt6, or installs it with your package manager (asking first), or,
+if it can't, sets up a copy just for Clawd. It adds a `clawd-pet` command and an entry in
+your app menu, then asks about starting at login, the Claude Code hooks and, on GNOME, the
+helper extension. Nothing is copied: he runs from the folder you cloned, so `git pull`
+updates him. `./install.sh --uninstall` takes it all out again.
+
+By hand, he only needs Python 3 and PyQt6:
+
+```bash
+sudo pacman -S python-pyqt6       # Arch, CachyOS, Manjaro
+sudo apt install python3-pyqt6    # Debian 12+, Ubuntu 22.04+
+sudo dnf install python3-pyqt6    # Fedora
+sudo zypper install python3-PyQt6 # openSUSE
 python3 claude_pet.py
 ```
 
-Tick **Start at login** in his right-click menu to have him come back each time (it also
-adds a "Clawd" entry to your app launcher). Only one Clawd runs at a time.
+Tick **Start at login** in his right-click menu to have him come back each time. Only one
+Clawd runs at a time: starting him again brings the running one back into view (handy on
+desktops without a system tray).
 
-**Desktops.** He's developed on KDE Plasma 6 (Wayland), where everything works. On
-Wayland he runs himself through XWayland, since a pet has to place its own window and
-Wayland doesn't allow that; the programs he opens get the normal environment back. On
-KDE a small KWin script tells him where the pointer and your windows are, which XWayland
-alone can't see. Desktop icons and wallpaper changes come from Plasma's config.
+### Desktops
+
+He runs on any Linux desktop with X11, or Wayland with XWayland: on Wayland he runs
+himself through XWayland, because a pet has to place its own window and Wayland doesn't
+allow that (the programs he opens get the normal environment back). What he can see of
+your desktop depends on what it tells him:
+
+| Desktop | The pointer | Windows to climb | Desktop icons | Wallpaper frights |
+|---|:---:|:---:|:---:|:---:|
+| KDE Plasma, Wayland | ✓ (a KWin script) | ✓ | ✓ | ✓ |
+| KDE Plasma, X11 | ✓ | ✓ | ✓ | ✓ |
+| GNOME, Wayland | ✓ with the helper extension | ✓ with the helper extension | | ✓ |
+| X11: GNOME, Cinnamon, MATE, XFCE, Budgie, LXQt, i3... | ✓ | ✓ | | ✓ (not LXQt, i3) |
+| Hyprland | ✓ | ✓ | | |
+| Sway | over X11 apps only | ✓ | | |
+| Other Wayland desktops | over X11 apps only | | | |
+
+On GNOME's Wayland session an X11 app can't see the pointer over other apps, nor their
+windows, so [a small GNOME Shell extension](gnome/clawd-pet@itzskyeyt.github.io) reports
+them (positions and sizes only, never titles or contents). The installer offers it; GNOME
+loads new extensions at your next login. Without it he still lives on your taskbar and
+does everything else. KDE gets the same from a KWin script he loads himself, Hyprland and
+Sway from their own IPC, X11 desktops from the window manager's standard properties.
+Desktop icons come from Plasma's layout, which no other desktop publishes.
 
 ## What he does
 
@@ -160,7 +179,7 @@ He ducks out of sight while something is fullscreen on his screen, and a new wal
 <table>
 <tr>
 <td align="center" valign="bottom"><img src="docs/media/watch.gif" width="400" alt=""><br><sub>He watches the pointer</sub></td>
-<td align="center" valign="bottom"><img src="docs/media/petting.gif" width="400" alt=""><br><sub>Stroke him: hearts, then a dance</sub></td>
+<td align="center" valign="bottom"><img src="docs/media/petting.gif" width="400" alt=""><br><sub>Pet him: hearts, then a dance</sub></td>
 </tr>
 <tr>
 <td align="center" valign="bottom"><img src="docs/media/grab.gif" width="400" alt=""><br><sub>Hold the pointer above him and he grabs it<br>(shake it to get him off)</sub></td>
@@ -223,7 +242,7 @@ ladder if he has to), makes a fuss for two minutes, then waits quietly.
 | **Left-click** | Open Claude Code (the Code tab of the Claude app, or `claude` in a terminal) |
 | **Right-click** | His menu: Claude Code, Play (every scene above), hat, size, quiet mode, settings, start at login, restart, quit |
 | **Drag** | Pick him up. Let go and he falls; throw him and he bounces |
-| **Stroke** | Move the pointer back and forth over him |
+| **Pet** | Move the pointer back and forth over him |
 | **Hold the pointer above him** | He grabs it. Whirl it round, or shake it to get him off |
 | **Drop a folder on him** | A new Claude Code session in that folder |
 | **Tray icon** | Click to hide or show him |
@@ -285,12 +304,16 @@ echo '{"cmd": "play", "action": "dance"}' | socat - "UNIX-CONNECT:$XDG_RUNTIME_D
 - Behaviours are generators that yield how long to wait; the physics (gravity, bounces,
   swinging from the pointer, the parachute) runs in small fixed steps, whatever the
   frame rate.
+- Your windows and the pointer come from whatever your desktop offers (see
+  [Desktops](#desktops)): a KWin script or the GNOME extension over D-Bus, Hyprland's and
+  Sway's IPC sockets, or X11's EWMH properties read straight from libX11.
 - More detail in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Development
 
 ```bash
 python3 -m unittest discover -s tests -v   # offscreen, nothing appears on screen
+node gnome/test.mjs                        # the GNOME extension, against a fake GNOME Shell
 python3 tools/make_media.py                # redraws every GIF in this README
 ```
 

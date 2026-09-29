@@ -12,7 +12,7 @@
       throws and drops land on the right floor (tests use the real two-screen layout)
 - [x] Claude Code hooks: types while it works, "!" + wave for permissions, celebrates
 - [x] Left-click opens the Code tab of the Claude app (or the session waiting on you)
-- [x] Watches the pointer, glances at it; stroke him for hearts and a dance
+- [x] Watches the pointer, glances at it; pet him for hearts and a dance
 - [x] Ladder between screens of different heights (up and down)
 - [x] Checks out desktop icons: puzzles, pokes, magnifying glass, verdict; stands on or hangs off them
 - [x] Reads a page from a desktop folder with glasses on, reacting to the story

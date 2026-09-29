@@ -8,12 +8,20 @@ when it needs a permission, celebrates when done.
 
 ## Run
 ```bash
-python claude_pet.py
+python claude_pet.py      # or ./install.sh: PyQt6, a clawd-pet command, menu entry, hooks
 ```
-Needs PyQt6 (CachyOS/Arch: `sudo pacman -S python-pyqt6`, elsewhere `pip install PyQt6`).
-On Wayland the app runs itself through XWayland, because a pet has to move its
-own window and Wayland doesn't allow that. Programs it launches get the normal
-environment back.
+Needs PyQt6 (CachyOS/Arch: `sudo pacman -S python-pyqt6`; `install.sh` knows the other
+distros and falls back to a venv). On Wayland the app runs itself through XWayland,
+because a pet has to move its own window and Wayland doesn't allow that. Programs it
+launches get the normal environment back. Without XWayland it says so and exits.
+
+**Desktops** (`desktop_kind()`): KDE Wayland gets the pointer and windows from a KWin
+script over D-Bus; GNOME Wayland from our extension (`gnome/`) over the same interface;
+Hyprland and Sway from their IPC sockets (`PolledFeed`); any X11 session from EWMH via
+ctypes libX11 (`X11`), which also gives the work area without xprop. Rows are always
+`[x, y, w, h, stacking, fullscreen, active, screen name or "", id]`. Wallpaper frights:
+Plasma's config on KDE, `gsettings monitor`/`xfconf-query -m` on GNOME, Cinnamon, MATE,
+Budgie and XFCE.
 
 - **Start at login**: tick "Start at login" in his menu (writes
   `~/.config/autostart/clawd-pet.desktop`, and a "Clawd" entry in the app launcher)
@@ -65,7 +73,7 @@ to what Claude Code is doing.
 - **Quiet mode**: he stays put and keeps to himself (a nap at most, no reminders or
   celebrations); Claude Code working or needing you still shows
 - **Drag**: pick him up; let go and he falls (throw him and he bounces)
-- **Stroke him** with the pointer (back and forth): hearts, happy eyes, eventually a dance
+- **Pet him** with the pointer (back and forth over him): hearts, happy eyes, eventually a dance
 - **He grabs the pointer**: hold it right above him for half a second and he always jumps
   up, grabs the arrow's tail and dangles from it, swinging as you move and kicking his
   legs (from anything but a reminder, his settings or a fall; after he lets go, move the
@@ -141,6 +149,11 @@ to what Claude Code is doing.
 - `claude_pet.py`: the app (sprite loading, behaviours, physics, hooks socket, launcher)
 - `clawd_hook.py`: the Claude Code hook (stdlib only, always exits 0 silently)
 - `tools/install_hooks.py`: adds/removes the hooks in `~/.claude/settings.json`
+- `install.sh`: installs for the user (PyQt6 from the distro or a venv, `~/.local/bin/clawd-pet`,
+  menu and login entries through `claude_pet.py --install [--autostart]`, hooks, the GNOME
+  extension); `--uninstall` undoes it
+- `gnome/clawd-pet@itzskyeyt.github.io/`: the GNOME Shell helper (GNOME 45+, ESM); `node
+  gnome/test.mjs` tests it against a mocked GNOME Shell
 - `sprites/clawd.json`: traced frames, palette, timings, loop points. Generated, don't hand-edit
 - `sprites/extras.py`: hand-drawn extras on the same grid (hats with anchors, the stretch
   pose with its head position, mug, steam, bottles, bubbles, bats, confetti, droplets,

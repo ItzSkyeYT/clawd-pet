@@ -1,0 +1,15 @@
+{
+  "uuid": "clawd-pet@itzskyeyt.github.io",
+  "name": "Clawd pet helper",
+  "description": "Tells the Clawd desktop pet where the pointer and your windows are while he runs, sending positions and sizes only, never titles or contents.",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50",
+    "51"
+  ],
+  "url": "https://github.com/ItzSkyeYT/clawd-pet"
+}
