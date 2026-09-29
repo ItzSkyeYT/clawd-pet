@@ -112,7 +112,7 @@ tool by tool, and it always comes first: he drops whatever he was up to.
 <tr>
 <td align="center" valign="bottom"><img src="docs/media/work_web.gif" width="260" alt=""><br><sub>Up on his cloud while it browses the web</sub></td>
 <td align="center" valign="bottom"><img src="docs/media/attention.gif" width="260" alt=""><br><sub>Waving you over when it needs a permission</sub></td>
-<td align="center" valign="bottom"><img src="docs/media/celebrate.gif" width="220" alt=""><br><sub>Party hat and confetti when it's done</sub></td>
+<td align="center" valign="bottom"><img src="docs/media/celebrate.gif" width="260" alt=""><br><sub>Party hat and confetti when it's done</sub></td>
 </tr>
 </table>
 
@@ -218,7 +218,7 @@ ladder if he has to), makes a fuss for two minutes, then waits quietly.
 
 ## Controls
 
-| | |
+| Do this | And |
 |---|---|
 | **Left-click** | Open Claude Code (the Code tab of the Claude app, or `claude` in a terminal) |
 | **Right-click** | His menu: Claude Code, Play (every scene above), hat, size, quiet mode, settings, start at login, restart, quit |

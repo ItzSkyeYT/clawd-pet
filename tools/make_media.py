@@ -84,6 +84,7 @@ class Stage:
         self.t = 0
         self.frames = []                    # QImages of the crop (drawing pass only)
         self.boxes = []                     # what was drawn, per frame, to crop to
+        self.feet = []                      # where his feet were, per frame
         self.wall = WALL
         self.show_cursor = False
         self.extra = None                   # draws more on top: fn(painter)
@@ -125,6 +126,8 @@ class Stage:
         if self.show_cursor and pet.cursor is not None:
             box = box.united(QRect(int(pet.cursor[0]) - 4, int(pet.cursor[1]) - 4, 24, 30))
         self.boxes.append(box)
+        if not (pet.airborne or pet.scripted or pet._dangling):
+            self.feet.append(pet._feet())               # standing on something
         if Stage.crop is not None:
             self.frames.append(self.draw())
 
@@ -170,9 +173,12 @@ class Stage:
         for b in self.boxes[1:] + self.keep:
             core = core.united(b)
         bottom = core.bottom() + pad
-        for floor in (LAPTOP_FLOOR, HDMI_FLOOR):            # down to the taskbar he stands on
-            if floor - 2 * pad <= core.bottom() <= floor + 2:
-                bottom = floor + PANEL_H - 1
+        lowest = max(self.feet, default=0)                  # the lowest floor he stood on
+        for floor in (LAPTOP_FLOOR, HDMI_FLOOR):            # down to its taskbar (any confetti
+            if abs(lowest - floor) < 2 or floor - 2 * pad <= core.bottom() <= floor + PANEL_H:
+                bottom = floor + PANEL_H - 1               # falling past it is cut off)
+                core.setBottom(min(core.bottom(), bottom))
+                break
         if size:
             w, h = SIZES[size]
             if core.width() + 16 <= w and bottom - core.top() + 8 <= h:
