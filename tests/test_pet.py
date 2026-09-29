@@ -2690,6 +2690,20 @@ class GrabThePointer(unittest.TestCase):
         self.assertTrue(any(f[1].startswith("spin") for f, _ in seen))
         self.assertTrue(any(abs(abs(sw) - math.pi) < 0.4 for _, sw in seen))   # over the top
 
+    def test_a_whirl_on_an_uneven_clock_is_not_a_shake(self):
+        x, y = self.hang_on()
+        t, turns, last = 0, 0.0, self.pet._swing
+        for k in range(200):                                   # ticks of 12 and 28 ms, like a busy desktop
+            step = 12 if k % 2 else 28
+            t += step
+            a = 2 * math.pi * 1.6 * t / 1000
+            self.pet.cursor_moved(int(x + 70 * math.cos(a)), int(y + 70 * math.sin(a)))
+            self.pet.advance(step)
+            self.assertTrue(self.pet._dangling, f"shaken off after {t} ms")
+            turns += abs((self.pet._swing - last + math.pi) % (2 * math.pi) - math.pi)
+            last = self.pet._swing
+        self.assertGreater(turns, 2 * math.pi)                 # and he still goes round
+
     def test_while_he_spins_clicks_still_go_past_him(self):
         x, y = self.hang_on()
         self.pet.catcher = cp.DropCatcher(self.pet)

@@ -3865,15 +3865,23 @@ class ClawdPet(QWidget):
         ax_f = ay_f = 0.0
         turned, dizzy = 0.0, False
         flips, shake_dir = [], 0
+        trail = collections.deque()                     # where the pointer's been, over SHAKE_MS
         happy_until = self.now + 2500
         kick_at, kick_until = self.now + random.uniform(3000, 7000), 0.0
         face, face_until = "idle", 0.0
         tired_at = None
+        last_t = self.now - TICK_MS                    # the first step draws him hanging straight away
         while True:
             c = self.cursor
             if c is None:
                 break
-            dt = TICK_MS / 1000
+            # the pointer's speed over the time that really passed: ticks come
+            # unevenly, and a whirl mistaken for a shake would throw him off
+            dt = min(0.1, (self.now - last_t) / 1000)
+            if dt <= 0:                                  # a second step within one tick
+                yield TICK_MS
+                continue
+            last_t = self.now
             gx, gy = c[0] + self.grip_offset[0], c[1] + self.grip_offset[1]
             nvx = 0.0 if prev_x is None else (gx - prev_x) / dt
             nvy = 0.0 if prev_y is None else (gy - prev_y) / dt
@@ -3896,14 +3904,23 @@ class ClawdPet(QWidget):
             turned = turned * math.exp(-dt / 4) + abs((self._swing - before + math.pi) % (2 * math.pi) - math.pi)
             if turned > 4 * math.pi:
                 dizzy = True                              # that was a good spin
-            # shaken back and forth: he can't hold on
+            # shaken back and forth: he can't hold on. Round and round is a
+            # whirl, not a shake, so it only counts along a line: much wider
+            # than it is tall
             if abs(nvx) > SHAKE_SPEED:
                 d = 1 if nvx > 0 else -1
                 if shake_dir and d != shake_dir:
                     flips.append(self.now)
                 shake_dir = d
             flips = [t for t in flips if self.now - t < SHAKE_MS]
-            if len(flips) >= SHAKE_FLIPS or self._release:
+            trail.append((self.now, gx, gy))
+            while trail and self.now - trail[0][0] > SHAKE_MS:
+                trail.popleft()
+            shaken = False
+            if len(flips) >= SHAKE_FLIPS:
+                xs, ys = [p[1] for p in trail], [p[2] for p in trail]
+                shaken = max(ys) - min(ys) < 0.5 * (max(xs) - min(xs))
+            if shaken or self._release:
                 vx += length * math.cos(self._swing) * self._swing_v      # flung off with his swing
                 vy -= length * math.sin(self._swing) * self._swing_v
                 break
