@@ -112,6 +112,7 @@ LABELS = {
     "birthday": "Birthday party",
     "remind_break": "Reminder: take a break", "remind_water": "Reminder: drink some water",
     "grab": "Grab the pointer",
+    "entrance": "Drop in (as when he starts)",
     "farewell": "Say goodbye (as when you quit him)",
 }
 ON_A_WINDOW = ["walk", "wave", "jump", "jump_happy", "dance", "laptop", "sparkler", "sleep", "yawn"]
@@ -124,8 +125,8 @@ AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["perch_window", "hop_down", "walk_up_win
 CLAUDE_PREVIEWS = ["work", "attention", "celebrate"]
 TIME_SCENES = ["yawn", "morning", "coffee", "birthday", "remind_break", "remind_water"]
 POINTER_SCENES = ["grab"]
-GOODBYES = ["farewell"]                    # a preview: he comes back
-PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + TIME_SCENES + POINTER_SCENES + GOODBYES
+COMING_AND_GOING = ["entrance", "farewell"]   # previews: he drops in again; he comes back
+PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + TIME_SCENES + POINTER_SCENES + COMING_AND_GOING
                + ["idle", "climb_window", "climb_down"])       # those two: either way, at random
 
 EXTRAS_FILE = os.path.join(HERE, "sprites", "extras.py")
@@ -143,6 +144,7 @@ PREF_DEFAULTS = {
     "petting": True,          # pet him for hearts
     "grab": True,             # jumps up and hangs off a pointer that hangs around above him
     "duck": True,             # drops out of sight for fullscreen windows
+    "entrance": True,         # started afresh, he skydives in and lands under a parachute
     "farewell": True,         # quit from his menu: a wail, then he crumbles to dust
     "day_cycle": True,        # yawns and naps at night, coffee in the morning
     "night_from": 22 * 60,    # minutes after midnight: night starts...
@@ -302,6 +304,8 @@ CLIMB_JUMP = 20               # cells: a window's side ending this far above his
 CLIMB_STYLES = {"wall": 3, "rope": 2}   # up or down a window's side: walking it (likelier) or on a rope
 ROPE_THROW_MS = 420           # the grappling hook's flight up onto a window's top
 RAPPEL_DROP = 10              # cells he slides down the rope between brakes
+ENTRANCE_FLOAT = 70           # arriving: the cord's pulled this many cells above where he'll land...
+ENTRANCE_DIVE = 1.1           # ...after a skydive of about this long (s) from above the screen's top
 WAIL_MS = 620                 # quitting: how long he wails before he starts to go
 CRUMBLE_STEPS = 22            # ...the frames of his darkening and crumbling to dust...
 CRUMBLE_MS = 50               # ...and how long each shows
@@ -332,7 +336,7 @@ AWAY = 10 * 60_000            # no pointer movement or prompt for this long: you
 PRESENT = 90_000              # reminders only come while you've done something this recently
 REMIND_LOUD = 120_000         # a reminder's first two minutes are loud; then he just holds it up
 REMINDERS = ("remind_water", "remind_break")
-NEVER_GRAB = REMINDERS + ("settings", "grab", "duck", "attention", "held", "fall", "come_down", "farewell")
+NEVER_GRAB = REMINDERS + ("settings", "grab", "duck", "attention", "held", "fall", "come_down", "entrance", "farewell")
 REMINDER_BITS = {"water_bubble", "break_bubble", "done_button", "done_button_pressed"}
 BUBBLE_AT = (23, -16)         # a reminder's bubble: over his right shoulder, clear of hats and bottles
 DONE_AT = (28, -1)            # its Done button: under the bubble, clear of the bottle at his side
@@ -1242,13 +1246,24 @@ def restart_command():
     return [sys.executable, SCRIPT] + sys.argv[1:]
 
 
+RESTARTED = "CLAWD_RESTARTED"      # in the environment of the process a Restart re-runs
+
+
 def env_for_restart(env=None):
     """The environment to restart in: without the XWayland override we set,
-    so the new process decides (and strips it for what it launches) itself."""
+    so the new process decides (and strips it for what it launches) itself;
+    and marked, so it knows he's carrying on rather than arriving."""
     env = dict(os.environ if env is None else env)
     if _FORCED_XCB:
         env.pop("QT_QPA_PLATFORM", None)
+    env[RESTARTED] = "1"
     return env
+
+
+def fresh_start(env=None):
+    """Was he started afresh, rather than re-run by his own Restart? (The mark
+    comes off the environment, so nothing he launches inherits it.)"""
+    return (os.environ if env is None else env).pop(RESTARTED, None) is None
 
 
 def show_running(path=None):
@@ -5728,6 +5743,11 @@ class ClawdPet(QWidget):
                 self.show_frame("skydive", (k // 5) % 2)
                 k += 1
                 yield TICK_MS
+        yield from self._under_canopy(parachute)
+
+    def _under_canopy(self, parachute):
+        """In the air: the cord pulled (a pop, and the parachute opens) or the
+        umbrella up, then down under it, swaying, until he lands; softly."""
         if self.airborne:
             self.show_frame("dangle", STRAIGHT)             # fists up, holding on
             self._chute_t = 0.0
@@ -6204,6 +6224,46 @@ class ClawdPet(QWidget):
         self._press = None
         e.accept()
 
+    def arrive(self):
+        """Just started (afresh, not by Restart): in from above the screen, see
+        _act_entrance. False, and he's simply there, if that's switched off, in
+        quiet mode, or with something fullscreen where he'd land (he'd only duck)."""
+        if not self.prefs["entrance"] or self.prefs["quiet"] or (self.prefs["duck"] and self._fullscreen_here()):
+            return False
+        self.start("entrance", manual=True)
+        return True
+
+    def _act_entrance(self):
+        """Arriving: over the top of his screen in a skydive, spread-eagled; a
+        little way up, the cord (or, now and then, his umbrella); down the rest
+        under it, swaying, onto his spot (or a window that's under him); and a
+        wave hello. He's above the screen from the moment this is asked for."""
+        s = self.scale
+        area = self.screen_geometry()
+        self.scripted = True                                # the dive is his own: the physics has a ceiling
+        self.airborne, self.vx, self.vy = False, 0.0, 0.0
+        self.y = area.top() - self.home_px.y() - (self.ih + 2) * s    # his feet just above the screen's top
+        self.show_frame("skydive" if "skydive" in self.sp.anims else "jump", 0 if "skydive" in self.sp.anims else 2)
+        self.move(int(self.x), int(self.y))
+        return self._drop_in(area.top() - self.home_px.y())
+
+    def _drop_in(self, ceiling):
+        s = self.scale
+        # the dive: all but the last stretch, and at least until he's on the screen
+        end = max(self.y + self._drop_below() - ENTRANCE_FLOAT * s, ceiling)
+        speed = min(420.0, max(90.0, (end - self.y) / s / ENTRANCE_DIVE)) * s
+        k = 0
+        while self.y < end:
+            if "skydive" in self.sp.anims:
+                self.show_frame("skydive", k // 5 % 2)
+            self.y = min(end, self.y + speed * TICK_MS / 1000)
+            k += 1
+            yield TICK_MS
+        self.scripted = False                               # on the screen now: over to the physics
+        self.airborne, self.vy = True, speed
+        yield from self._under_canopy(random.random() < 0.7)
+        yield from self._play("wave", range(len(self.sp.anims["wave"].frames)))    # hello
+
     def leave(self):
         """Quit, his way (the menu's Quit): a wail and a crumble to dust first, and
         the app goes when he has. At once if that's switched off, if he's out of
@@ -6449,7 +6509,7 @@ class ClawdPet(QWidget):
         m.addAction("Open claude.ai").triggered.connect(lambda _=False: open_claude_web())
         m.addSeparator()
         play = m.addMenu("Play")
-        for group in (ACTIONS, AROUND_THE_DESKTOP, POINTER_SCENES, TIME_SCENES, CLAUDE_PREVIEWS, GOODBYES):
+        for group in (ACTIONS, AROUND_THE_DESKTOP, POINTER_SCENES, TIME_SCENES, CLAUDE_PREVIEWS, COMING_AND_GOING):
             if play.actions():
                 play.addSeparator()
             for key in group:
@@ -6549,6 +6609,7 @@ class SettingsDialog(QDialog):
         lay.addWidget(self._check("grab", "Grab onto the pointer when it hangs around above him "
                                           "(shake it to get him off)"))
         lay.addWidget(self._check("duck", "Duck out of sight while something is fullscreen"))
+        lay.addWidget(self._check("entrance", "Drop in by parachute when he starts"))
         lay.addWidget(self._check("farewell", "A proper goodbye when you quit him: a wail, then he crumbles to dust"))
         root.addWidget(box)
 
@@ -6695,12 +6756,15 @@ def main():
     if show_running():
         print("Clawd is already running: he's back in view.")
         return
+    fresh = fresh_start()
     app = QApplication(sys.argv)
     app.setApplicationName("clawd-pet")
     app.setQuitOnLastWindowClosed(False)
     sprites = load_sprites()
     settings = QSettings("clawd-pet", "clawd-pet")
     pet = ClawdPet(sprites, settings)
+    if fresh:
+        pet.arrive()                             # in by parachute; a Restart just carries on
     pet.show()
     pet.listen()
     # where the pointer and the windows are: see "Other desktops"

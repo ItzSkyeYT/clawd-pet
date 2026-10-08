@@ -53,6 +53,13 @@ to what Claude Code is doing.
 - **Right-click**: menu (Claude Code, new session, terminal, claude.ai, Play: every move,
   the desktop and time-of-day scenes, reminder previews and the Claude Code states;
   Hat, Size, Quiet mode, Settings…, start at login, restart, quit)
+- **Starting him**: he arrives from above his screen: a skydive, spread-eagled, over the top
+  edge, then the cord a little way up (now and then it's his umbrella), down the rest under
+  it, swaying, onto his spot (or a window that's under it), and a wave hello. Only when
+  started afresh: "Restart Clawd" marks the process it re-runs (`CLAWD_RESTARTED`), so he
+  just carries on, and showing him again from the tray is no arrival either. Not in quiet
+  mode or under something fullscreen; Settings → Reactions has the switch (pref
+  `entrance`); Play → "Drop in" previews it
 - **Quit** (his menu, or the tray's): he goes the way that wailing emoji does: arms up, head
   back (his eyes two short strokes at the top of his face, slanting up towards each other),
   a great dome of a mouth with a tongue in it, trembling; then he darkens to ash from the
@@ -76,7 +83,7 @@ to what Claude Code is doing.
   Lively, a pout for a scene you turn off, a start when you resize him, a hop for a new
   hat), and jumps for joy when you close them. The dialog has: how lively he is
   (Lively: barely a second's rest between scenes and no winding down), size, which scenes he does on his own, pointer,
-  petting, fullscreen ducking, his goodbye, time of day, holidays, hat, reminders and their
+  petting, fullscreen ducking, his entrance and his goodbye, time of day, holidays, hat, reminders and their
   intervals, Claude Code hooks, start at login. Changes apply at once (QSettings `prefs/`)
 - **Quiet mode**: he stays put and keeps to himself (a nap at most, no reminders or
   celebrations); Claude Code working or needing you still shows

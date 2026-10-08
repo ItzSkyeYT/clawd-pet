@@ -115,7 +115,15 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
   shakes it loose. All of them follow the window if it moves (`_follow()`, rope included),
   fall if it goes, and take no more than `LADDER_TIME` however tall the side
 
-## Quitting
+## Arriving and quitting
+- `main()` asks `fresh_start()` (false in the process `restart()` re-ran: `env_for_restart()`
+  leaves `CLAWD_RESTARTED` in its environment, taken off again at once) and, if so, calls
+  `arrive()` before the window is shown. `_act_entrance` puts him above his screen's top
+  there and then (so he never flashes at his spot) and returns `_drop_in()`: a scripted
+  skydive, since the physics has a ceiling at the top of the screen, for about
+  `ENTRANCE_DIVE` seconds to `ENTRANCE_FLOAT` cells above what's under him
+  (`_drop_below()`), then airborne with that speed into `_under_canopy()`, the same
+  parachute or umbrella code as `_float_down()`, and the official wave
 - The menu's Quit calls `leave()`: it starts `_act_farewell` (manual) and sets `_leaving`,
   after which `start()` refuses everything else and the mouse and menu are ignored. The
   scene holds the `wail` frame, trembling, for `WAIL_MS`; `_crumble()` then composites what's

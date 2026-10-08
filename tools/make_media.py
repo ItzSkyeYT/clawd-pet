@@ -164,9 +164,10 @@ class Stage:
         p.end()
         return img
 
-    def save(self, name, size=None, pad=24):
+    def save(self, name, size=None, pad=24, max_h=None):
         """Measuring: crop to everything that moved (plus `keep`), at a
-        standard size ("S", "M", "W") when it fits. Drawing: write the GIF."""
+        standard size ("S", "M", "W") when it fits; no taller than `max_h`
+        (the top's cut off: he comes in over it). Drawing: write the GIF."""
         if Stage.crop is not None:
             write_gif(os.path.join(OUT, name + ".gif"), self.frames, self.frame_ms)
             return
@@ -180,6 +181,8 @@ class Stage:
                 bottom = floor + PANEL_H - 1               # falling past it is cut off)
                 core.setBottom(min(core.bottom(), bottom))
                 break
+        if max_h is not None and bottom - core.top() + pad > max_h:
+            core.setTop(bottom - max_h + pad)
         if size:
             w, h = SIZES[size]
             if core.width() + 16 <= w and bottom - core.top() + 8 <= h:
@@ -648,6 +651,20 @@ def _drop():
         pet._emit("spark", 6 + 6 * k, -4, vy=-5, life=700)
     st.run(2200, each=lambda t: pet.cursor_moved(int(cx), int(cy - 20)))
     st.save("drop_folder", "M")
+
+
+@scene("arrive", "you", "Start him and he drops in by parachute")
+def _arrive():
+    st = Stage()
+    st.stand(900)
+    undo = nudge_random(0.3)                        # the parachute (now and then it's the umbrella)
+    st.pet.arrive()
+    while st.pet._feet() < LAPTOP_FLOOR - 560:      # the top of the dive is out of the picture
+        st.pet.advance(STEP_MS)
+        st.t += STEP_MS
+    st.settle("entrance", ms=20_000, tail=700)
+    undo()
+    st.save("arrive", max_h=440)
 
 
 @scene("goodbye", "you", "Quit him and he goes the way that emoji does")

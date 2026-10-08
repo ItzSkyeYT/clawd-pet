@@ -3693,6 +3693,105 @@ class DayTimes(unittest.TestCase):
             cp.hooks_installed = real
 
 
+class Arriving(unittest.TestCase):
+    """Started afresh, he skydives in over the top of his screen, pulls the cord a little
+    way up and floats down the rest onto his spot."""
+
+    def setUp(self):
+        random.seed(8)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.pet.show()
+        self.spot = self.pet.box_span()[0]
+        self.floor = self.pet._feet()
+
+    def tearDown(self):
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def watch(self, ms=15_000):
+        """(frame, feet, layers) on every tick until he's done arriving."""
+        seen = []
+        for _ in range(int(ms / 16)):
+            self.pet.advance(16)
+            seen.append((self.pet.frame[1], self.pet._feet(), tuple(self.pet.layers)))
+            if self.pet.action != "entrance":
+                break
+        return seen
+
+    def test_he_drops_in_from_above_the_screen(self):
+        self.assertTrue(self.pet.arrive())
+        self.assertEqual(self.pet.action, "entrance")
+        self.assertLess(self.pet._feet(), self.pet.screen_geometry().top())   # all of him above it: out of sight
+        self.assertAlmostEqual(self.pet.box_span()[0], self.spot, delta=1)
+        seen = self.watch()
+        names = [n for n, _, _ in seen]
+        canopy = [i for i, (_, _, layers) in enumerate(seen) if "parachute_1" in layers or "umbrella" in layers]
+        self.assertIn("skydive", names)
+        self.assertTrue(canopy)
+        self.assertLess(names.index("skydive"), canopy[0])                   # the dive, then the cord
+        feet = [f for _, f, _ in seen]
+        self.assertEqual(feet, sorted(feet))                                 # down all the way, never back up
+        self.assertAlmostEqual(self.pet._feet(), self.floor, delta=1)        # onto his own floor...
+        self.assertAlmostEqual(self.pet.box_span()[0], self.spot, delta=4 * self.pet.scale)   # ...on his spot
+        self.assertIn("wave", names)                                         # and hello
+        self.assertFalse(self.pet.layers)                                    # the canopy put away
+        self.assertFalse(self.pet.airborne)
+
+    def test_a_quick_dive_and_a_short_float(self):
+        self.pet.arrive()
+        seen = self.watch()
+        diving = 16 * sum(1 for n, _, _ in seen if n == "skydive")
+        floating = 16 * sum(1 for _, _, layers in seen if layers)
+        self.assertLess(diving, 1600)
+        self.assertGreater(floating, 1200)
+        self.assertLess(floating, 3400)
+        self.assertLess(16 * len(seen), 8000)
+
+    def test_onto_a_window_if_one_is_under_him(self):
+        self.pet.windows_changed([[int(self.spot) - 200, 1000, 500, 600, 3, 0, 1, "eDP-1", "w"]])
+        self.pet.arrive()
+        self.watch()
+        self.assertAlmostEqual(self.pet._feet(), 1000, delta=1)
+        self.assertEqual(self.pet.standing_on, "w")
+
+    def test_not_when_switched_off_keeping_quiet_or_under_something_fullscreen(self):
+        self.pet.prefs["entrance"] = False
+        self.assertFalse(self.pet.arrive())
+        self.assertAlmostEqual(self.pet._feet(), self.floor, delta=1)        # he's just there
+        self.assertNotEqual(self.pet.action, "entrance")
+        self.pet.prefs["entrance"] = True
+        self.pet.prefs["quiet"] = True
+        self.assertFalse(self.pet.arrive())
+        self.pet.prefs["quiet"] = False
+        area = self.pet.screen_geometry()
+        self.pet.windows_changed([[area.left(), area.top(), area.width(), 1200, 1, 1, 1, "", "f"]])
+        self.assertTrue(self.pet._fullscreen_here())
+        self.assertFalse(self.pet.arrive())
+
+    def test_a_restart_is_not_an_arrival(self):
+        env = cp.env_for_restart({"HOME": "/h"})
+        self.assertFalse(cp.fresh_start(env))                # the process Restart re-runs: he just carries on
+        self.assertNotIn(cp.RESTARTED, env)                  # and nothing he launches inherits the mark
+        self.assertTrue(cp.fresh_start({"HOME": "/h"}))
+
+    def test_from_play_he_drops_in_again(self):
+        self.pet.play("entrance")
+        self.assertLess(self.pet._feet(), self.pet.screen_geometry().top())
+        seen = self.watch()
+        self.assertIn("skydive", [n for n, _, _ in seen])
+        self.assertAlmostEqual(self.pet._feet(), self.floor, delta=1)
+
+    def test_settings_and_play_have_it(self):
+        self.assertIs(cp.PREF_DEFAULTS["entrance"], True)
+        menu = self.pet.fill_menu(cp.QMenu())
+        play = [a for a in menu.actions() if a.text() == "Play"][0].menu()
+        self.assertIn(cp.LABELS["entrance"], [a.text() for a in play.actions()])
+        d = cp.SettingsDialog(self.pet)
+        d.checks["entrance"].setChecked(False)
+        self.assertFalse(self.pet.prefs["entrance"])
+        d.deleteLater()
+
+
 class Goodbye(unittest.TestCase):
     """Quit from his menu: a wail with his arms up, then he crumbles to dust, and only
     then does the app quit."""
