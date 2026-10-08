@@ -650,6 +650,22 @@ def _drop():
     st.save("drop_folder", "M")
 
 
+@scene("goodbye", "you", "Quit him and he goes the way that emoji does")
+def _goodbye():
+    st = Stage()
+    st.stand(900)
+    st.run(900)
+    gone = []
+    real, cp.QApplication.quit = cp.QApplication.quit, lambda: gone.append(1)
+    try:
+        st.pet.leave()
+        st.run(8000, until=lambda: gone)
+    finally:
+        cp.QApplication.quit = real
+    st.run(700)                             # ...and he's gone
+    st.save("goodbye", "S")
+
+
 # ── Time and seasons ──────────────────────────────────────────────
 
 @scene("nightcap", "time", "His nightcap all night, and naps")

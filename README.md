@@ -193,6 +193,9 @@ He ducks out of sight while something is fullscreen on his screen, and a new wal
 <td align="center" valign="bottom"><img src="docs/media/throw.gif" width="366" alt=""><br><sub>Pick him up and throw him</sub></td>
 <td align="center" valign="bottom"><img src="docs/media/drop_folder.gif" width="400" alt=""><br><sub>Drop a folder on him to start<br>a Claude Code session there</sub></td>
 </tr>
+<tr>
+<td align="center" valign="bottom" colspan="2"><img src="docs/media/goodbye.gif" width="260" alt=""><br><sub>Quit him and he goes the way that emoji does:<br>a wail, then dust</sub></td>
+</tr>
 </table>
 
 ### Time and seasons
@@ -245,6 +248,7 @@ ladder if he has to), makes a fuss for two minutes, then waits quietly.
 |---|---|
 | **Left-click** | Open Claude Code (the Code tab of the Claude app, or `claude` in a terminal) |
 | **Right-click** | His menu: Claude Code, Play (every scene above), hat, size, quiet mode, settings, start at login, restart, quit |
+| **Quit** | He wails and crumbles to dust first. Quit again to skip it, or turn it off in Settings |
 | **Drag** | Pick him up. Let go and he falls; throw him and he bounces |
 | **Pet** | Move the pointer back and forth over him |
 | **Hold the pointer above him** | He grabs it. Whirl it round, or shake it to get him off |
@@ -267,7 +271,7 @@ Right-click → **Settings…** Everything applies at once.
 - **What he does on his own**: untick what you'd rather he didn't do by himself. The
   Play menu keeps everything
 - **Reactions**: watching the pointer, being petted, grabbing the pointer, ducking out
-  of fullscreen apps
+  of fullscreen apps, his goodbye when you quit him
 - **Time and seasons**: night and morning hours, holiday hats, a birthday party, or
   pick a hat to wear all the time
 - **Reminders**: how often you'd like to be told to take a break, or drink some water

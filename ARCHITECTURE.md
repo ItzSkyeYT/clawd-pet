@@ -115,6 +115,21 @@ Claude Code event ─→ clawd_hook.py (async hook) ─→ Unix socket ─→ Cl
   shakes it loose. All of them follow the window if it moves (`_follow()`, rope included),
   fall if it goes, and take no more than `LADDER_TIME` however tall the side
 
+## Quitting
+- The menu's Quit calls `leave()`: it starts `_act_farewell` (manual) and sets `_leaving`,
+  after which `start()` refuses everything else and the mouse and menu are ignored. The
+  scene holds the `wail` frame, trembling, for `WAIL_MS`; `_crumble()` then composites what's
+  on screen (frame, hat, arms over its brim) at one pixel a cell and `crumble_frames()` cuts
+  it into `CRUMBLE_STEPS` + 1 pictures: each cell has a fixed moment to go (further right is
+  sooner, plus a speckle), the ash running well ahead of the edge. The scene shows them in
+  turn and throws a `dust_*` particle for `DUST_SHARE` of the cells that have just gone;
+  when the dust has faded it calls `QApplication.quit()` (and then yields for ever)
+- `leave()` quits at once when asked again, when pref `farewell` is off, or when he's
+  hidden or ducked off screen. The socket's `quit` and SIGINT/SIGTERM never go through it.
+  From Play (`farewell` in `GOODBYES`) `_leaving` stays off: he runs the frames backwards
+  and carries on. Each crumbling animation is built for the moment (`crumble_N`), the last
+  one and its cached pixmaps and masks dropped when the next is made
+
 ## Coming down softly
 - `_come_down(vx, vy)` replaces the plain drop off a window (`_act_hop_down`, after
   walking to the brink), an icon visit, the reading cloud and the bottom of a climbed-down

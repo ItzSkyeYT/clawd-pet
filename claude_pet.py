@@ -112,6 +112,7 @@ LABELS = {
     "birthday": "Birthday party",
     "remind_break": "Reminder: take a break", "remind_water": "Reminder: drink some water",
     "grab": "Grab the pointer",
+    "farewell": "Say goodbye (as when you quit him)",
 }
 ON_A_WINDOW = ["walk", "wave", "jump", "jump_happy", "dance", "laptop", "sparkler", "sleep", "yawn"]
 LIVELY = ("dance", "race", "sparkler", "jump", "jump_happy", "cloud")   # calmer at night
@@ -123,7 +124,8 @@ AROUND_THE_DESKTOP = BETWEEN_SCREENS + ["perch_window", "hop_down", "walk_up_win
 CLAUDE_PREVIEWS = ["work", "attention", "celebrate"]
 TIME_SCENES = ["yawn", "morning", "coffee", "birthday", "remind_break", "remind_water"]
 POINTER_SCENES = ["grab"]
-PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + TIME_SCENES + POINTER_SCENES
+GOODBYES = ["farewell"]                    # a preview: he comes back
+PLAYABLE = set(ACTIONS + AROUND_THE_DESKTOP + CLAUDE_PREVIEWS + TIME_SCENES + POINTER_SCENES + GOODBYES
                + ["idle", "climb_window", "climb_down"])       # those two: either way, at random
 
 EXTRAS_FILE = os.path.join(HERE, "sprites", "extras.py")
@@ -141,6 +143,7 @@ PREF_DEFAULTS = {
     "petting": True,          # pet him for hearts
     "grab": True,             # jumps up and hangs off a pointer that hangs around above him
     "duck": True,             # drops out of sight for fullscreen windows
+    "farewell": True,         # quit from his menu: a wail, then he crumbles to dust
     "day_cycle": True,        # yawns and naps at night, coffee in the morning
     "night_from": 22 * 60,    # minutes after midnight: night starts...
     "night_to": 6 * 60,       # ...and ends (and the morning begins)...
@@ -198,6 +201,10 @@ EYES = ((6, 2), (16, 2))
 
 BODY = (216, 119, 86)         # Clawd's own colour, #d87756
 INK = (20, 20, 19)            # Anthropic's near-black, as in the official art
+SHADE = (191, 105, 77)        # his shaded side in the official art, #bf694d
+MOUTH = (88, 26, 20)          # the rim of his mouth when he wails: dark maroon, as on that emoji...
+TONGUE = (128, 62, 40)        # ...and his tongue, a darker, browner shade of himself
+ASH = (46, 30, 26)            # what he turns to when he goes
 IVORY = (250, 249, 245)
 BLUE = (106, 155, 204)        # Claude Code's own "professional blue"
 PINK = (232, 91, 106)
@@ -249,6 +256,10 @@ GLYPHS = {
               "#.#.#.#.#.#.#.#"], {"#": INK}),
     "spark": ([".#.", "###", ".#."], {"#": GOLD}),
     "scrap": (["+++", "+c+", "+++"], {"+": IVORY, "c": GREY}),
+    # crumbling away when he quits: specks of ash
+    "dust_0": (["#"], {"#": ASH}),
+    "dust_1": (["#"], {"#": (84, 52, 42)}),
+    "dust_2": (["##"], {"#": ASH}),
 }
 # Props he holds or wears, positioned in sprite pixels from the idle pose's top-left.
 PROPS = {
@@ -291,6 +302,10 @@ CLIMB_JUMP = 20               # cells: a window's side ending this far above his
 CLIMB_STYLES = {"wall": 3, "rope": 2}   # up or down a window's side: walking it (likelier) or on a rope
 ROPE_THROW_MS = 420           # the grappling hook's flight up onto a window's top
 RAPPEL_DROP = 10              # cells he slides down the rope between brakes
+WAIL_MS = 620                 # quitting: how long he wails before he starts to go
+CRUMBLE_STEPS = 22            # ...the frames of his darkening and crumbling to dust...
+CRUMBLE_MS = 50               # ...and how long each shows
+DUST_SHARE = 0.6              # how many of his cells fly off as a speck (the rest just go)
 LEAP_GAP = 80                 # cells: how far across he'll jump to another window top...
 LEAP_UP = 50                  # ...at most this much higher...
 LEAP_DOWN = 150               # ...or this much lower
@@ -317,7 +332,7 @@ AWAY = 10 * 60_000            # no pointer movement or prompt for this long: you
 PRESENT = 90_000              # reminders only come while you've done something this recently
 REMIND_LOUD = 120_000         # a reminder's first two minutes are loud; then he just holds it up
 REMINDERS = ("remind_water", "remind_break")
-NEVER_GRAB = REMINDERS + ("settings", "grab", "duck", "attention", "held", "fall", "come_down")
+NEVER_GRAB = REMINDERS + ("settings", "grab", "duck", "attention", "held", "fall", "come_down", "farewell")
 REMINDER_BITS = {"water_bubble", "break_bubble", "done_button", "done_button_pressed"}
 BUBBLE_AT = (23, -16)         # a reminder's bubble: over his right shoulder, clear of hats and bottles
 DONE_AT = (28, -1)            # its Done button: under the bubble, clear of the bottle at his side
@@ -550,6 +565,71 @@ def pose_rows(idle, kind):
         g[ly + 1][lx + 1] = g[ly + 2][lx] = ink
         g[ry + 1][rx] = g[ry + 2][rx + 1] = ink
     return ["".join(r) for r in g]
+
+
+def wail_rows(up, body, ink, rim, tongue):
+    """Him wailing like that emoji, on Clawd-Jumping's arms-up frame brought down
+    to the floor (`up`): head thrown back, so his eyes are two short strokes at
+    the very top of his face, slanting up towards each other ( / \\ ), and under
+    them the mouth: a great dome, most of his face, narrow at the top and nearly
+    as wide as he is at the bottom, dark-rimmed and black inside, a round tongue
+    rising from the bottom of it."""
+    top = next(y for y, r in enumerate(up) if ink in r)            # his eyes' top row: the top of his face
+    g = [list(r) for r in up]
+    for ex, _ in EYES:
+        for y in range(top, top + 4):                              # the frame's own eyes are tall: off
+            g[y][ex] = g[y][ex + 1] = body
+    for x, y in ((9, 0), (10, 0), (7, 1), (8, 1), (13, 0), (14, 0), (15, 1), (16, 1)):
+        g[top + y][x] = ink
+    dome = [(9, 14), (8, 15), (7, 16)] + [(6, 17)] * 5             # each row's first and last column
+    mound = {4: (10, 13), 5: (9, 14), 6: (8, 15), 7: (8, 15)}      # the tongue, in the dome's lower rows
+    for i, (x0, x1) in enumerate(dome):
+        above = dome[i - 1] if i else (x1 + 1, x0 - 1)
+        for x in range(x0, x1 + 1):
+            edge = x in (x0, x1) or not above[0] <= x <= above[1]  # the dome's top and sides
+            g[top + 3 + i][x] = rim if edge else ink
+        if i in mound:
+            for x in range(mound[i][0], mound[i][1] + 1):
+                g[top + 3 + i][x] = tongue
+    return ["".join(r) for r in g]
+
+
+def crumble_frames(img, steps=CRUMBLE_STEPS):
+    """A picture of him (one pixel per cell) crumbling to dust, like that emoji:
+    `steps` + 1 pictures in which he darkens to ash from the right, then the ash
+    goes, cell by cell, until nothing's left; and with each picture, the cells
+    that have just gone. When a cell goes depends only on where it is (and a
+    fixed speckle), so he always goes the same way."""
+    img = img.convertToFormat(QImage.Format.Format_RGBA8888)
+    w, h, stride = img.width(), img.height(), img.bytesPerLine()
+    ptr = img.constBits()
+    ptr.setsize(img.sizeInBytes())
+    data = bytes(ptr)
+    when = {}
+    for y in range(h):
+        for x in range(w):
+            if data[y * stride + x * 4 + 3]:
+                speck = (((x * 73856093) ^ (y * 19349663)) >> 3 & 0xff) / 255
+                when[x, y] = 0.6 * (1 - x / max(1, w - 1)) + 0.12 * y / max(1, h - 1) + 0.28 * speck
+    lo, hi = min(when.values(), default=0.0), max(when.values(), default=1.0)
+    when = {c: (v - lo) / ((hi - lo) or 1.0) for c, v in when.items()}
+    frames, gone, before = [], [], -1.0
+    for k in range(steps + 1):
+        edge = -0.9 + 1.91 * k / steps                   # the ash runs well ahead of what's gone
+        buf, went = bytearray(w * h * 4), []
+        for (x, y), v in when.items():
+            if v < edge:
+                if v >= before:
+                    went.append((x, y))
+                continue
+            i = y * stride + x * 4
+            burnt = 0.93 if v < edge + 0.4 else 0.6 if v < edge + 0.65 else 0.25 if v < edge + 0.9 else 0.0
+            buf[(y * w + x) * 4:(y * w + x) * 4 + 4] = bytes(
+                [round(data[i + c] + (ASH[c] - data[i + c]) * burnt) for c in range(3)] + [255])
+        frames.append(QImage(bytes(buf), w, h, w * 4, QImage.Format.Format_RGBA8888).copy())
+        gone.append(went)
+        before = edge
+    return frames, gone
 
 
 def climb_rows(idle):
@@ -793,6 +873,11 @@ class Sprites:
         drop = hy + self.ih - 1 - max(y for y, r in enumerate(up) if r.strip("."))
         self.anims["cheer"] = Anim("cheer", {"size": jump["size"], "home": jump["home"], "frames": [
             {"ms": 300, "rows": ["." * len(up[0])] * drop + up[:len(up) - drop]}]}, palette)
+        # ...and wailing in that pose, for his goodbye when you quit him
+        rim, tongue = [k for k in "tuvwxyz" if k not in palette][:2]
+        self.anims["wail"] = Anim("wail", {"size": jump["size"], "home": jump["home"], "frames": [
+            {"ms": 300, "rows": wail_rows(["." * len(up[0])] * drop + up[:len(up) - drop], body, ink, rim, tongue)}]},
+            {**palette, rim: MOUTH, tongue: TONGUE})
         self.anims["poke"] = Anim("poke", {
             "size": [self.iw + 3, self.ih], "home": [0, 0],
             "frames": [{"ms": 180, "rows": poke_rows(idle)}]}, palette)
@@ -2178,6 +2263,9 @@ class ClawdPet(QWidget):
         self.rope = Prop()                     # the grappling hook's rope, down a window's side
         self._rope_key = None
         self.climb_styles = dict(CLIMB_STYLES)
+        self._leaving = False                  # quitting: his goodbye is playing, then the app goes
+        self._crumbled = None                  # the last crumbling animation built (see _crumble)
+        self._crumbles = 0
         self.icon_source = desktop_icons
         self.window_list = []          # other apps' windows, from KWin (dicts)
         self.standing_on = None        # id of the window whose top he's standing on
@@ -2495,6 +2583,8 @@ class ClawdPet(QWidget):
     def start(self, action, manual=False, **kw):
         """Switch to a behaviour. `manual` marks one you asked for (menu, click,
         socket, petting): Claude Code events wait for it to finish."""
+        if self._leaving and action != "farewell":
+            return                              # on his way out: nothing else now
         self.manual = manual
         if manual:
             self._last_activity = self.now
@@ -2685,7 +2775,7 @@ class ClawdPet(QWidget):
             self._place_reminder_bits()
         if waiting:
             self.frame = ARMS_UP                 # "for me?"
-        else:
+        elif self.action != "farewell":
             self._petting(dt)
             self._watch_cursor()
             self._maybe_grab(dt)
@@ -6053,6 +6143,9 @@ class ClawdPet(QWidget):
         yield from self._come_down(vx, vy)
 
     def mousePressEvent(self, e):
+        if self._leaving:
+            e.accept()                           # too late to pick him up
+            return
         self.wake()
         self._user_active()
         if e.button() == Qt.MouseButton.LeftButton:
@@ -6110,6 +6203,100 @@ class ClawdPet(QWidget):
                 self.launch_claude_code(kind)
         self._press = None
         e.accept()
+
+    def leave(self):
+        """Quit, his way (the menu's Quit): a wail and a crumble to dust first, and
+        the app goes when he has. At once if that's switched off, if he's out of
+        sight anyway, or if he's asked a second time."""
+        if self._leaving or not self.prefs["farewell"] or not self.isVisible() or self.offscreen:
+            QApplication.quit()
+            return
+        self.start("farewell", manual=True)
+        self._leaving = True
+
+    def _crumble(self):
+        """What he looks like this instant, hat and all, as an animation of him
+        crumbling to dust (crumble_frames): its name and, frame by frame, the
+        cells that have just gone, in sprite pixels from the idle pose's top-left.
+        The hat is in the pictures, so it goes with him."""
+        s, kind = self.scale, self.frame
+        img = self.sp.anims[kind[1]].frames[kind[2]] if kind[0] == "anim" else self.sp.poses[kind[1]]
+        if kind[-1]:
+            img = flipped(img)
+        at = self._frame_pos(kind)
+        parts = [(at.x() // s, at.y() // s, img)]
+        hat = self._hat_image()
+        if hat is not None:
+            parts.append((hat[1].x() // s, hat[1].y() // s, hat[0]))
+        x0, y0 = min(x for x, _, _ in parts), min(y for _, y, _ in parts)
+        canvas = QImage(max(x + i.width() for x, _, i in parts) - x0, max(y + i.height() for _, y, i in parts) - y0,
+                        QImage.Format.Format_RGBA8888)
+        canvas.fill(Qt.GlobalColor.transparent)
+        p = QPainter(canvas)
+        for x, y, i in parts:
+            p.drawImage(x - x0, y - y0, i)
+        if hat is not None and not self._hat_turned:
+            (cx, top), w, mirror = self._head()          # arms raised past his head: in front of the brim
+            left = w - cx - HEAD_W // 2 if mirror else cx - HEAD_W // 2
+            p.setClipRegion(QRegion(0, 0, w, top + 4).subtracted(QRegion(left, top, HEAD_W, 4))
+                            .translated(parts[0][0] - x0, parts[0][1] - y0))
+            p.drawImage(parts[0][0] - x0, parts[0][1] - y0, img)
+        p.end()
+        frames, gone = crumble_frames(canvas)
+        if self._crumbled is not None:                   # the one from last time (a preview): forget it
+            self.sp.anims.pop(self._crumbled, None)
+            for key in [k for k in self._pixmaps if k[1] == self._crumbled]:
+                del self._pixmaps[key]
+            for key in [k for k in self._masks if k[0][1] == self._crumbled]:
+                del self._masks[key]
+        self._crumbles += 1
+        a = Anim.__new__(Anim)
+        a.name = self._crumbled = f"crumble_{self._crumbles}"
+        a.w, a.h = canvas.width(), canvas.height()
+        a.home = (self.home_px.x() // s - x0, self.home_px.y() // s - y0)
+        a.loop = a.outro = None
+        a.frames, a.ms = frames, [CRUMBLE_MS] * len(frames)
+        a.heads = [None] * len(frames)                   # no hat on top: it's in the pictures
+        self.sp.anims[a.name] = a
+        return a.name, [[(x - a.home[0], y - a.home[1]) for x, y in went] for went in gone]
+
+    def _act_farewell(self):
+        """Goodbye, the way that emoji goes: arms up, head back and a great wail,
+        trembling; then he darkens to ash from one side and crumbles to dust that
+        blows away. When the last of it has gone, so has he: the app quits.
+        (From Play it's only a preview, and he pulls himself back together.)"""
+        s = self.scale
+        self.scripted = True                             # wherever he is, mid-air even: right there
+        self.vx = self.vy = 0.0
+        x0 = self.x
+        shake = max(1, s // 3)
+        self.show_frame("wail", 0)
+        for tick in range(int(WAIL_MS / TICK_MS)):
+            if tick % 2 == 0:                            # trembling with it
+                self.x = x0 + random.choice((-shake, 0, shake))
+            yield TICK_MS
+        self.x = x0
+        self.show_frame("wail", 0)
+        name, gone = self._crumble()
+        for k, went in enumerate(gone):
+            self.show_frame(name, k)
+            for x, y in went:
+                if random.random() < DUST_SHARE:         # blown up and away to the right, as it went
+                    self._emit(random.choices(("dust_0", "dust_1", "dust_2"), (5, 3, 1))[0], x, y,
+                               vx=random.uniform(6, 27), vy=-random.uniform(2, 13), g=-5,
+                               life=random.uniform(600, 1250))
+            yield CRUMBLE_MS
+        yield 700                                        # the last of the dust
+        if self._leaving:
+            QApplication.quit()
+            while True:                                  # gone: nothing more from him
+                yield 1000
+        for k in range(len(gone) - 1, -1, -2):           # only a preview: back together again
+            self.show_frame(name, k)
+            yield 30
+        self.scripted = False
+        self.pose("happy")
+        yield 700
 
     def restart(self):
         """Start afresh (same process, new code): remember where he is, let
@@ -6262,7 +6449,7 @@ class ClawdPet(QWidget):
         m.addAction("Open claude.ai").triggered.connect(lambda _=False: open_claude_web())
         m.addSeparator()
         play = m.addMenu("Play")
-        for group in (ACTIONS, AROUND_THE_DESKTOP, POINTER_SCENES, TIME_SCENES, CLAUDE_PREVIEWS):
+        for group in (ACTIONS, AROUND_THE_DESKTOP, POINTER_SCENES, TIME_SCENES, CLAUDE_PREVIEWS, GOODBYES):
             if play.actions():
                 play.addSeparator()
             for key in group:
@@ -6300,10 +6487,12 @@ class ClawdPet(QWidget):
         login.setChecked(autostart_enabled())
         login.triggered.connect(lambda on: set_autostart(on))
         m.addAction("Restart Clawd").triggered.connect(lambda _=False: self.restart())
-        m.addAction("Quit").triggered.connect(lambda _=False: QApplication.quit())
+        m.addAction("Quit").triggered.connect(lambda _=False: self.leave())
         return m
 
     def contextMenuEvent(self, e):
+        if self._leaving:
+            return
         self._menu = self.fill_menu(QMenu(self))
         self._menu.exec(e.globalPos())
 
@@ -6360,6 +6549,7 @@ class SettingsDialog(QDialog):
         lay.addWidget(self._check("grab", "Grab onto the pointer when it hangs around above him "
                                           "(shake it to get him off)"))
         lay.addWidget(self._check("duck", "Duck out of sight while something is fullscreen"))
+        lay.addWidget(self._check("farewell", "A proper goodbye when you quit him: a wail, then he crumbles to dust"))
         root.addWidget(box)
 
         box = QGroupBox("Time and seasons")

@@ -53,6 +53,14 @@ to what Claude Code is doing.
 - **Right-click**: menu (Claude Code, new session, terminal, claude.ai, Play: every move,
   the desktop and time-of-day scenes, reminder previews and the Claude Code states;
   Hat, Size, Quiet mode, Settings…, start at login, restart, quit)
+- **Quit** (his menu, or the tray's): he goes the way that wailing emoji does: arms up, head
+  back (his eyes two short strokes at the top of his face, slanting up towards each other),
+  a great dome of a mouth with a tongue in it, trembling; then he darkens to ash from the
+  right and crumbles to dust that blows away up and to the right, hat and all, and only
+  then does the app quit. Quit again and it's at once; so are `{"cmd": "quit"}` on the
+  socket (the installer uses it) and a kill; hidden or ducked he just goes. Settings →
+  Reactions has the switch (pref `farewell`). Play → "Say goodbye" previews it, and he
+  pulls himself back together
 - **Play goes and does it**: whatever you pick, he sets it up first. Hop down or climb
   down from the floor: up onto a window first (a hop if one's in reach, up its side if
   that reaches the floor, else a ladder leaned against it). Jump to another window: onto
@@ -68,7 +76,7 @@ to what Claude Code is doing.
   Lively, a pout for a scene you turn off, a start when you resize him, a hop for a new
   hat), and jumps for joy when you close them. The dialog has: how lively he is
   (Lively: barely a second's rest between scenes and no winding down), size, which scenes he does on his own, pointer,
-  petting, fullscreen ducking, time of day, holidays, hat, reminders and their
+  petting, fullscreen ducking, his goodbye, time of day, holidays, hat, reminders and their
   intervals, Claude Code hooks, start at login. Changes apply at once (QSettings `prefs/`)
 - **Quiet mode**: he stays put and keeps to himself (a nap at most, no reminders or
   celebrations); Claude Code working or needing you still shows
@@ -183,6 +191,11 @@ to what Claude Code is doing.
 - Each animation stores `home`: where the idle pose sits inside it, so every animation lines up
 - Blink / look / happy / sleep faces are derived from the idle pose in `pose_rows()`,
   copying how the official art draws them (the laptop wink, the dance's ^ ^ eyes)
+- His goodbye: `wail_rows()` draws the wail on Clawd-Jumping's arms-up frame (the eyes and
+  the mouth are that emoji's, in his ink, a dark maroon rim and a browner tongue);
+  `crumble_frames()` takes a picture of him as he is, hat included, and makes the frames of
+  him darkening to ash from the right and going cell by cell (the dust is particles,
+  `dust_0`..`dust_2`)
 - Walking up and down a window's side (`wall_up`, `wall_down`) is the official walk turned
   a quarter by `turned_ccw()` (mirrored first to face down); hats are turned the same way
   from the walk's own heads (`_turned_hat()`)

@@ -3693,6 +3693,156 @@ class DayTimes(unittest.TestCase):
             cp.hooks_installed = real
 
 
+class Goodbye(unittest.TestCase):
+    """Quit from his menu: a wail with his arms up, then he crumbles to dust, and only
+    then does the app quit."""
+
+    def setUp(self):
+        random.seed(5)
+        self.pet = cp.ClawdPet(cp.load_sprites(), settings=None)
+        self.pet.show()
+        self.quits = []
+        self.real_quit = cp.QApplication.quit
+        cp.QApplication.quit = lambda: self.quits.append(self.pet.now)
+
+    def tearDown(self):
+        cp.QApplication.quit = self.real_quit
+        self.pet.timer.stop()
+        self.pet.deleteLater()
+
+    def watch(self, ms=8000):
+        """Run on until he quits (or ms pass): each new frame shown, and every kind of particle seen."""
+        frames, kinds = [], set()
+        for _ in range(int(ms / 16)):
+            self.pet.advance(16)
+            if not frames or frames[-1] != self.pet.frame:
+                frames.append(self.pet.frame)
+            kinds |= {q["kind"] for q in self.pet.particles}
+            if self.quits:
+                break
+        return frames, kinds
+
+    @staticmethod
+    def cells(img):
+        """(x, y) of every cell drawn in a frame."""
+        return [(x, y) for y in range(img.height()) for x in range(img.width()) if img.pixelColor(x, y).alpha()]
+
+    def test_quit_is_a_wail_and_then_dust(self):
+        start = self.pet.now
+        self.pet.leave()
+        self.assertEqual(self.pet.action, "farewell")
+        self.assertFalse(self.quits)                                   # not yet
+        frames, kinds = self.watch()
+        names = [f[1] for f in frames if f[0] == "anim"]
+        crumbling = [n for n in names if n.startswith("crumble")]
+        self.assertIn("wail", names)
+        self.assertGreater(len(crumbling), 8)
+        self.assertLess(names.index("wail"), names.index(crumbling[0]))
+        self.assertNotIn("drop", kinds)                                # no tears: that emoji has none
+        self.assertTrue(any(k.startswith("dust") for k in kinds), kinds)
+        self.assertEqual(len(self.quits), 1)
+        self.assertGreater(self.quits[0] - start, 1200)                # he gets his moment...
+        self.assertLess(self.quits[0] - start, 3500)                   # ...and doesn't hang about
+
+    def test_he_is_all_gone_before_the_app_quits(self):
+        self.pet.leave()
+        self.watch()
+        kind, name, idx, _ = self.pet.frame
+        a = self.pet.sp.anims[name]
+        self.assertTrue(name.startswith("crumble"))
+        self.assertEqual(idx, len(a.frames) - 1)
+        left = [len(self.cells(img)) for img in a.frames]
+        self.assertGreater(left[0], 200)                               # all of him to begin with
+        self.assertEqual(left, sorted(left, reverse=True))             # only ever less of him
+        self.assertEqual(left[-1], 0)
+
+    def test_he_darkens_then_goes_from_the_right_like_the_gif(self):
+        self.pet.leave()
+        self.watch()
+        a = self.pet.sp.anims[self.pet.frame[1]]
+        whole = self.cells(a.frames[0])
+
+        def dark(img, cells):
+            return [c for c in cells if sum(img.pixelColor(*c).getRgb()[:3]) < sum(cp.BODY) * 0.6]
+        mid = a.frames[len(a.frames) // 2]
+        still = self.cells(mid)
+        self.assertGreater(len(still), 0.85 * len(whole))              # halfway he's nearly all still there...
+        self.assertLess(len(dark(a.frames[0], whole)), 0.35 * len(whole))
+        self.assertGreater(len(dark(mid, still)), 0.6 * len(still))    # ...but turned to ash
+        half = next(c for c in map(self.cells, a.frames) if len(c) <= len(whole) / 2)
+
+        def mean(cells):
+            return sum(x for x, _ in cells) / len(cells)
+        self.assertLess(mean(half), mean(whole) - 2)                   # and what's left then is his left side
+
+    def test_asking_again_quits_at_once(self):
+        self.pet.leave()
+        run_ms(self.pet, 300)
+        self.assertFalse(self.quits)
+        self.pet.leave()
+        self.assertEqual(len(self.quits), 1)
+
+    def test_nothing_gets_in_the_way(self):
+        self.pet.leave()
+        run_ms(self.pet, 200)
+        self.pet.play("dance")
+        self.pet.start("walk")
+        self.pet.claude_event({"event": "PermissionRequest", "session": "s1"})
+        self.pet.cursor_moved(int(self.pet.x) + 60, int(self.pet.y) - 10)
+        run_ms(self.pet, 200)
+        self.assertEqual(self.pet.action, "farewell")
+        self.watch()
+        self.assertEqual(len(self.quits), 1)
+
+    def test_his_hat_crumbles_with_him(self):
+        self.pet.prefs["hat"] = "party_hat"
+        self.pet.settle_hat()
+        self.pet.leave()
+        self.assertTrue(run_ms(self.pet, 4000, until=lambda: self.pet.frame[1].startswith("crumble")))
+        self.assertIsNone(self.pet._hat_image())                       # no hat left hanging in the air
+        first = self.pet.sp.anims[self.pet.frame[1]].frames[0]
+        colours = {(c.red(), c.green(), c.blue()) for c in (first.pixelColor(x, y) for x, y in self.cells(first))}
+        self.assertTrue(colours - {cp.BODY, cp.INK, cp.SHADE, cp.MOUTH, cp.TONGUE}, colours)   # the hat's in the frames
+
+    def test_with_the_setting_off_he_just_goes(self):
+        self.pet.prefs["farewell"] = False
+        self.pet.leave()
+        self.assertEqual(len(self.quits), 1)
+        self.assertNotEqual(self.pet.action, "farewell")
+
+    def test_hidden_he_just_goes(self):
+        self.pet.hide()
+        self.pet.leave()
+        self.assertEqual(len(self.quits), 1)
+
+    def test_a_preview_from_play_brings_him_back(self):
+        self.pet.play("farewell")
+        frames, kinds = self.watch(9000)
+        self.assertFalse(self.quits)
+        self.assertTrue(any(k.startswith("dust") for k in kinds))
+        self.assertNotEqual(self.pet.action, "farewell")               # back to his usual self
+        self.assertFalse(self.pet.frame[1].startswith("crumble"))
+        self.pet.play("dance")                                         # and takes requests again
+        self.assertEqual(self.pet.action, "dance")
+
+    def test_the_menu_quit_is_the_goodbye_and_settings_has_its_switch(self):
+        menu = self.pet.fill_menu(cp.QMenu())
+        quit_action = [a for a in menu.actions() if a.text() == "Quit"][0]
+        quit_action.trigger()
+        self.assertEqual(self.pet.action, "farewell")
+        self.assertFalse(self.quits)
+        self.assertIs(cp.PREF_DEFAULTS["farewell"], True)
+        fresh = cp.ClawdPet(cp.load_sprites(), settings=None)
+        try:
+            d = cp.SettingsDialog(fresh)
+            d.checks["farewell"].setChecked(False)
+            self.assertFalse(fresh.prefs["farewell"])
+            d.deleteLater()
+        finally:
+            fresh.timer.stop()
+            fresh.deleteLater()
+
+
 class Launcher(unittest.TestCase):
     def test_clicking_opens_the_code_tab_of_the_app(self):
         self.assertEqual(cp.CLAUDE_LINKS["continue"], "claude://code/continue?session=last")
